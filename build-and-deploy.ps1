@@ -6,8 +6,10 @@ $DistDir = Join-Path $ProjectDir 'dist'
 $GameDir = 'C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2'
 $GodotExe = 'C:\Users\ecfan\Downloads\Godot_v4.5.1-stable_mono_win64\Godot_v4.5.1-stable_mono_win64\Godot_v4.5.1-stable_mono_win64_console.exe'
 $GameDll = Join-Path $GameDir 'data_sts2_windows_x86_64\sts2.dll'
+$GameHarmonyDll = Join-Path $GameDir 'data_sts2_windows_x86_64\0Harmony.dll'
 $ModDir = Join-Path $GameDir "mods\$ProjectName"
 $ProjectDll = Join-Path $ProjectDir 'sts2.dll'
+$ProjectHarmonyDll = Join-Path $ProjectDir '0Harmony.dll'
 $ManifestPath = Join-Path $ProjectDir 'mod_manifest.json'
 $CsprojPath = Join-Path $ProjectDir 'FirstMod.csproj'
 $ExportPresetPath = Join-Path $ProjectDir 'export_presets.cfg'
@@ -107,6 +109,7 @@ function Invoke-GodotExport {
 
 Require-File -Path $GodotExe -Label 'Godot exe'
 Require-File -Path $GameDll -Label 'game sts2.dll'
+Require-File -Path $GameHarmonyDll -Label 'game 0Harmony.dll'
 Require-File -Path $ManifestPath -Label 'mod manifest'
 Require-File -Path $CsprojPath -Label 'csproj'
 Require-File -Path $ExportPresetPath -Label 'export preset'
@@ -124,6 +127,7 @@ New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ModDir | Out-Null
 
 Copy-Item -LiteralPath $GameDll -Destination $ProjectDll -Force
+Copy-Item -LiteralPath $GameHarmonyDll -Destination $ProjectHarmonyDll -Force
 Remove-Item -LiteralPath $OutputDll, $OutputPck, $OutputJson -Force -ErrorAction SilentlyContinue
 
 Write-Host "Using Godot: $GodotExe"

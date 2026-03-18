@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Godot;
@@ -11,7 +10,6 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
-using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 
 namespace FirstMod.Bridge;
@@ -26,26 +24,39 @@ internal static class StateExporter
 
     public static string StateFilePath => Path.Combine(StateDirectoryPath, "state.json");
 
-    private static string StateDirectoryPath => ProjectSettings.GlobalizePath("user://first-mod-bridge");
+    internal static string StateDirectoryPath => ProjectSettings.GlobalizePath("user://first-mod-bridge");
 
     public static StableBridgeSnapshot BuildStableSnapshot()
     {
         RunManager? runManager = RunManager.Instance;
         CombatManager? combatManager = CombatManager.Instance;
-        RunState? runState = GetRunState(runManager);
-        CombatState? combatState = GetCombatState(runState);
-        Player? player = GetPrimaryPlayer(combatState, runState);
+        RunState? runState = BridgeIntrospection.GetRunState(runManager);
+        CombatState? combatState = BridgeIntrospection.GetCombatState(runState);
+        Player? player = BridgeIntrospection.GetPrimaryPlayer(combatState, runState);
         PlayerCombatState? playerCombatState = player?.PlayerCombatState;
+        CardSelectionContextSnapshot? cardSelection = BridgeIntrospection.BuildCardSelectionContext();
+        RewardContextSnapshot? rewards = cardSelection is null ? BridgeIntrospection.BuildRewardContext() : null;
+        MapContextSnapshot? map = BridgeIntrospection.BuildMapContext(runState);
+        bool shouldExportEventChoices = cardSelection is null && rewards is null && map is null;
+        List<ChoiceSnapshot> choices = shouldExportEventChoices ? BridgeIntrospection.BuildChoiceSnapshots(runState) : [];
+        ChoiceContextSnapshot? choiceContext = shouldExportEventChoices ? BridgeIntrospection.BuildChoiceContext(runState) : null;
+        ProceedContextSnapshot? proceedContext = BridgeIntrospection.BuildProceedContext(runState, choices.Count, cardSelection);
 
         return new StableBridgeSnapshot
         {
             ProtocolVersion = 1,
-            Scene = DetermineScene(runManager, combatManager, runState, combatState),
-            WaitingForInput = DetermineWaitingForInput(runManager, combatManager),
+            Scene = DetermineScene(runManager, combatManager, runState, combatState, cardSelection, rewards, map),
+            WaitingForInput = DetermineWaitingForInput(runManager, combatManager, choices.Count, cardSelection, rewards, proceedContext, map),
             Run = BuildRunSnapshot(runState),
             Player = BuildPlayerSnapshot(player),
             Enemies = BuildEnemySnapshots(combatState),
             Hand = BuildHandSnapshots(playerCombatState),
+            CardSelection = cardSelection,
+            Rewards = rewards,
+            Map = map,
+            ChoiceContext = choiceContext,
+            ProceedContext = proceedContext,
+            Choices = choices,
             DrawPileCount = GetPileCount(playerCombatState?.DrawPile),
             DiscardPileCount = GetPileCount(playerCombatState?.DiscardPile),
             ExhaustPileCount = GetPileCount(playerCombatState?.ExhaustPile),
@@ -71,6 +82,12 @@ internal static class StateExporter
             Player = stableSnapshot.Player,
             Enemies = stableSnapshot.Enemies,
             Hand = stableSnapshot.Hand,
+            CardSelection = stableSnapshot.CardSelection,
+            Rewards = stableSnapshot.Rewards,
+            Map = stableSnapshot.Map,
+            ChoiceContext = stableSnapshot.ChoiceContext,
+            ProceedContext = stableSnapshot.ProceedContext,
+            Choices = stableSnapshot.Choices,
             DrawPileCount = stableSnapshot.DrawPileCount,
             DiscardPileCount = stableSnapshot.DiscardPileCount,
             ExhaustPileCount = stableSnapshot.ExhaustPileCount,
@@ -94,23 +111,73 @@ internal static class StateExporter
         RunManager? runManager,
         CombatManager? combatManager,
         RunState? runState,
-        CombatState? combatState)
+        CombatState? combatState,
+        CardSelectionContextSnapshot? cardSelection,
+        RewardContextSnapshot? rewards,
+        MapContextSnapshot? map)
     {
+        if (cardSelection is not null)
+        {
+            return "card_selection";
+        }
+
+        if (rewards is not null)
+        {
+            return "rewards";
+        }
+
+        if (map is not null)
+        {
+            return "map";
+        }
+
         if (combatManager?.IsInProgress == true && combatState is not null)
         {
             return "combat";
         }
 
-        if (runManager?.IsInProgress == true && runState?.CurrentRoom is not null)
+        if (runManager?.IsInProgress == true && runState is not null)
         {
-            return runState.CurrentRoom.RoomType.ToString();
+            return BridgeIntrospection.DetermineNonCombatScene(runState);
         }
 
         return "main_menu";
     }
 
-    private static bool DetermineWaitingForInput(RunManager? runManager, CombatManager? combatManager)
+    private static bool DetermineWaitingForInput(
+        RunManager? runManager,
+        CombatManager? combatManager,
+        int choiceCount,
+        CardSelectionContextSnapshot? cardSelection,
+        RewardContextSnapshot? rewards,
+        ProceedContextSnapshot? proceedContext,
+        MapContextSnapshot? map)
     {
+        if (cardSelection is not null)
+        {
+            return true;
+        }
+
+        if (rewards is not null)
+        {
+            return true;
+        }
+
+        if (map is not null)
+        {
+            return map.IsTravelEnabled && !map.IsTraveling;
+        }
+
+        if (proceedContext is not null)
+        {
+            return true;
+        }
+
+        if (choiceCount > 0)
+        {
+            return true;
+        }
+
         if (combatManager is null)
         {
             return false;
@@ -178,7 +245,7 @@ internal static class StateExporter
         {
             enemies.Add(new EnemySnapshot
             {
-                Id = string.IsNullOrEmpty(enemy.SlotName) ? $"enemy_{index.ToString(CultureInfo.InvariantCulture)}" : enemy.SlotName,
+                Id = BridgeIntrospection.BuildCreatureId(enemy, index),
                 Name = enemy.Name,
                 Hp = enemy.CurrentHp,
                 MaxHp = enemy.MaxHp,
@@ -204,76 +271,23 @@ internal static class StateExporter
         {
             if (card is null)
             {
+                index += 1;
                 continue;
             }
 
             cards.Add(new CardSnapshot
             {
-                Id = $"hand_{index.ToString(CultureInfo.InvariantCulture)}",
-                Name = GetStringProperty(card, "Title"),
-                Description = GetStringProperty(card, "Description"),
-                Cost = GetPropertyText(card, "EnergyCost"),
-                Playable = GetBoolProperty(card, "IsPlayable"),
+                Id = BridgeIntrospection.BuildCardId(card, index),
+                Name = BridgeIntrospection.GetCardName(card),
+                Description = BridgeIntrospection.GetCardDescription(card),
+                Cost = BridgeIntrospection.GetCardCostText(card),
+                Rarity = BridgeIntrospection.GetCardRarity(card),
+                Playable = BridgeIntrospection.IsCardPlayable(card),
             });
             index += 1;
         }
 
         return cards;
-    }
-
-    private static CombatState? GetCombatState(RunState? runState)
-    {
-        if (runState?.CurrentRoom is CombatRoom combatRoom)
-        {
-            return combatRoom.CombatState;
-        }
-
-        return null;
-    }
-
-    private static RunState? GetRunState(RunManager? runManager)
-    {
-        if (runManager is null)
-        {
-            return null;
-        }
-
-        object? reflectedState = runManager.GetType().GetProperty("State")?.GetValue(runManager);
-        if (reflectedState is RunState runState)
-        {
-            return runState;
-        }
-
-        MethodInfo? debugStateMethod = runManager.GetType().GetMethod(
-            "DebugOnlyGetState",
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        if (debugStateMethod?.Invoke(runManager, null) is RunState debugState)
-        {
-            return debugState;
-        }
-
-        return null;
-    }
-
-    private static Player? GetPrimaryPlayer(CombatState? combatState, RunState? runState)
-    {
-        if (combatState?.Players is not null)
-        {
-            foreach (Player player in combatState.Players)
-            {
-                return player;
-            }
-        }
-
-        if (runState?.Players is not null)
-        {
-            foreach (Player player in runState.Players)
-            {
-                return player;
-            }
-        }
-
-        return null;
     }
 
     private static int GetPileCount(CardPile? pile)
@@ -301,35 +315,6 @@ internal static class StateExporter
 
         return count;
     }
-
-    private static string GetStringProperty(object source, string propertyName)
-    {
-        PropertyInfo? property = source.GetType().GetProperty(propertyName);
-        if (property?.GetValue(source) is string value)
-        {
-            return value;
-        }
-
-        return string.Empty;
-    }
-
-    private static string GetPropertyText(object source, string propertyName)
-    {
-        PropertyInfo? property = source.GetType().GetProperty(propertyName);
-        object? value = property?.GetValue(source);
-        return value?.ToString() ?? string.Empty;
-    }
-
-    private static bool GetBoolProperty(object source, string propertyName)
-    {
-        PropertyInfo? property = source.GetType().GetProperty(propertyName);
-        if (property?.GetValue(source) is bool value)
-        {
-            return value;
-        }
-
-        return false;
-    }
 }
 
 internal sealed record StableBridgeSnapshot
@@ -354,6 +339,24 @@ internal sealed record StableBridgeSnapshot
 
     [property: JsonPropertyName("hand")]
     public required List<CardSnapshot> Hand { get; init; }
+
+    [property: JsonPropertyName("card_selection")]
+    public required CardSelectionContextSnapshot? CardSelection { get; init; }
+
+    [property: JsonPropertyName("rewards")]
+    public required RewardContextSnapshot? Rewards { get; init; }
+
+    [property: JsonPropertyName("map")]
+    public required MapContextSnapshot? Map { get; init; }
+
+    [property: JsonPropertyName("choice_context")]
+    public required ChoiceContextSnapshot? ChoiceContext { get; init; }
+
+    [property: JsonPropertyName("proceed_context")]
+    public required ProceedContextSnapshot? ProceedContext { get; init; }
+
+    [property: JsonPropertyName("choices")]
+    public required List<ChoiceSnapshot> Choices { get; init; }
 
     [property: JsonPropertyName("draw_pile_count")]
     public required int DrawPileCount { get; init; }
@@ -396,6 +399,24 @@ internal sealed record BridgeSnapshot
 
     [property: JsonPropertyName("hand")]
     public required List<CardSnapshot> Hand { get; init; }
+
+    [property: JsonPropertyName("card_selection")]
+    public required CardSelectionContextSnapshot? CardSelection { get; init; }
+
+    [property: JsonPropertyName("rewards")]
+    public required RewardContextSnapshot? Rewards { get; init; }
+
+    [property: JsonPropertyName("map")]
+    public required MapContextSnapshot? Map { get; init; }
+
+    [property: JsonPropertyName("choice_context")]
+    public required ChoiceContextSnapshot? ChoiceContext { get; init; }
+
+    [property: JsonPropertyName("proceed_context")]
+    public required ProceedContextSnapshot? ProceedContext { get; init; }
+
+    [property: JsonPropertyName("choices")]
+    public required List<ChoiceSnapshot> Choices { get; init; }
 
     [property: JsonPropertyName("draw_pile_count")]
     public required int DrawPileCount { get; init; }
@@ -493,6 +514,150 @@ internal sealed record CardSnapshot
     [property: JsonPropertyName("cost")]
     public required string Cost { get; init; }
 
+    [property: JsonPropertyName("rarity")]
+    public required string Rarity { get; init; }
+
     [property: JsonPropertyName("playable")]
     public required bool Playable { get; init; }
+}
+
+internal sealed record ChoiceSnapshot
+{
+    [property: JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [property: JsonPropertyName("title")]
+    public required string Title { get; init; }
+
+    [property: JsonPropertyName("description")]
+    public required string Description { get; init; }
+
+    [property: JsonPropertyName("locked")]
+    public required bool Locked { get; init; }
+
+    [property: JsonPropertyName("proceed")]
+    public required bool Proceed { get; init; }
+
+    [property: JsonPropertyName("will_kill_player")]
+    public required bool WillKillPlayer { get; init; }
+}
+
+internal sealed record ChoiceContextSnapshot
+{
+    [property: JsonPropertyName("kind")]
+    public required string Kind { get; init; }
+
+    [property: JsonPropertyName("title")]
+    public required string Title { get; init; }
+
+    [property: JsonPropertyName("description")]
+    public required string Description { get; init; }
+}
+
+internal sealed record ProceedContextSnapshot
+{
+    [property: JsonPropertyName("kind")]
+    public required string Kind { get; init; }
+
+    [property: JsonPropertyName("label")]
+    public required string Label { get; init; }
+}
+
+internal sealed record CardSelectionContextSnapshot
+{
+    [property: JsonPropertyName("kind")]
+    public required string Kind { get; init; }
+
+    [property: JsonPropertyName("prompt")]
+    public required string Prompt { get; init; }
+
+    [property: JsonPropertyName("min_select")]
+    public required int MinSelect { get; init; }
+
+    [property: JsonPropertyName("max_select")]
+    public required int MaxSelect { get; init; }
+
+    [property: JsonPropertyName("require_manual_confirmation")]
+    public required bool RequireManualConfirmation { get; init; }
+
+    [property: JsonPropertyName("cancelable")]
+    public required bool Cancelable { get; init; }
+
+    [property: JsonPropertyName("cards")]
+    public required List<CardSnapshot> Cards { get; init; }
+}
+
+internal sealed record RewardContextSnapshot
+{
+    [property: JsonPropertyName("proceed_enabled")]
+    public required bool ProceedEnabled { get; init; }
+
+    [property: JsonPropertyName("rewards")]
+    public required List<RewardSnapshot> Rewards { get; init; }
+}
+
+internal sealed record RewardSnapshot
+{
+    [property: JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [property: JsonPropertyName("reward_type")]
+    public required string RewardType { get; init; }
+
+    [property: JsonPropertyName("title")]
+    public required string Title { get; init; }
+
+    [property: JsonPropertyName("description")]
+    public required string Description { get; init; }
+
+    [property: JsonPropertyName("skippable")]
+    public required bool Skippable { get; init; }
+
+    [property: JsonPropertyName("selectable")]
+    public required bool Selectable { get; init; }
+}
+
+internal sealed record MapContextSnapshot
+{
+    [property: JsonPropertyName("is_travel_enabled")]
+    public required bool IsTravelEnabled { get; init; }
+
+    [property: JsonPropertyName("is_traveling")]
+    public required bool IsTraveling { get; init; }
+
+    [property: JsonPropertyName("current_point_id")]
+    public required string? CurrentPointId { get; init; }
+
+    [property: JsonPropertyName("points")]
+    public required List<MapPointSnapshot> Points { get; init; }
+}
+
+internal sealed record MapPointSnapshot
+{
+    [property: JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [property: JsonPropertyName("point_type")]
+    public required string PointType { get; init; }
+
+    [property: JsonPropertyName("room_kind")]
+    public required string RoomKind { get; init; }
+
+    [property: JsonPropertyName("col")]
+    public required int? Col { get; init; }
+
+    [property: JsonPropertyName("row")]
+    public required int? Row { get; init; }
+
+    [property: JsonPropertyName("children")]
+    public required List<string> Children { get; init; }
+
+    [property: JsonPropertyName("visited")]
+    public required bool Visited { get; init; }
+
+    [property: JsonPropertyName("current")]
+    public required bool Current { get; init; }
+
+    [property: JsonPropertyName("travelable")]
+    public required bool Travelable { get; init; }
 }

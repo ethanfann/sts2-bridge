@@ -1,0 +1,478 @@
+using System;
+using System.Globalization;
+using System.IO;
+using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Runs;
+
+namespace FirstMod.Bridge;
+
+internal static class CommandProcessor
+{
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        WriteIndented = true,
+    };
+
+    private static string? _lastProcessedCommandId;
+
+    public static string CommandFilePath => Path.Combine(StateExporter.StateDirectoryPath, "command.json");
+
+    private static string ResultFilePath => Path.Combine(StateExporter.StateDirectoryPath, "command-result.json");
+
+    public static void ProcessPendingCommand()
+    {
+        if (!File.Exists(CommandFilePath))
+        {
+            return;
+        }
+
+        string payload;
+        try
+        {
+            payload = File.ReadAllText(CommandFilePath);
+        }
+        catch (IOException)
+        {
+            return;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return;
+        }
+
+        BridgeCommand? command;
+        try
+        {
+            command = JsonSerializer.Deserialize<BridgeCommand>(payload, JsonOptions);
+        }
+        catch (JsonException)
+        {
+            return;
+        }
+
+        if (command is null)
+        {
+            WriteResult(new CommandResult
+            {
+                CommandId = null,
+                Status = "error",
+                Message = "Command payload could not be parsed.",
+                ProcessedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+            });
+            DeleteCommandFile();
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(command.CommandId))
+        {
+            WriteResult(Error(null, "command_id is required."));
+            DeleteCommandFile();
+            return;
+        }
+
+        if (command.CommandId == _lastProcessedCommandId)
+        {
+            DeleteCommandFile();
+            return;
+        }
+
+        CommandResult result = Execute(command);
+        WriteResult(result);
+        _lastProcessedCommandId = command.CommandId;
+        DeleteCommandFile();
+    }
+
+    private static CommandResult Execute(BridgeCommand command)
+    {
+        try
+        {
+            return command.Type switch
+            {
+                "end_turn" => ExecuteEndTurn(command),
+                "play_card" => ExecutePlayCard(command),
+                "proceed" => ExecuteProceed(command),
+                "take_reward" => ExecuteTakeReward(command),
+                "skip_reward" => ExecuteSkipReward(command),
+                "select_map_point" => ExecuteSelectMapPoint(command),
+                "select_card" => ExecuteSelectCard(command),
+                "select_choice" => ExecuteSelectChoice(command),
+                _ => Error(command.CommandId, $"Unsupported command type '{command.Type}'."),
+            };
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"FirstMod bridge command failed: {exception}");
+            return Error(command.CommandId, exception.Message);
+        }
+    }
+
+    private static CommandResult ExecuteEndTurn(BridgeCommand command)
+    {
+        BridgeContext? context = BuildContext();
+        if (context is null)
+        {
+            return Error(command.CommandId, "Combat context unavailable.");
+        }
+
+        if (!IsWaitingForInput(context.RunManager, context.CombatManager))
+        {
+            return Error(command.CommandId, "Combat is not waiting for player input.");
+        }
+
+        Type? actionType = context.Player.GetType().Assembly.GetType("MegaCrit.Sts2.Core.GameActions.EndPlayerTurnAction");
+        object? action = actionType is null
+            ? null
+            : Activator.CreateInstance(actionType, context.Player, context.CombatState.RoundNumber);
+        if (action is null)
+        {
+            return Error(command.CommandId, "Could not construct EndPlayerTurnAction.");
+        }
+
+        if (!TryEnqueueAction(context.RunManager, action))
+        {
+            return Error(command.CommandId, "Could not enqueue EndPlayerTurnAction.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, "End turn queued.");
+    }
+
+    private static CommandResult ExecutePlayCard(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.CardId))
+        {
+            return Error(command.CommandId, "play_card requires card_id.");
+        }
+
+        BridgeContext? context = BuildContext();
+        if (context is null)
+        {
+            return Error(command.CommandId, "Combat context unavailable.");
+        }
+
+        if (!IsWaitingForInput(context.RunManager, context.CombatManager))
+        {
+            return Error(command.CommandId, "Combat is not waiting for player input.");
+        }
+
+        object? handItem = BridgeIntrospection.FindHandCardById(context.Player.PlayerCombatState, command.CardId);
+        if (handItem is null)
+        {
+            return Error(command.CommandId, $"Card '{command.CardId}' not found in hand.");
+        }
+
+        CardModel? cardModel = BridgeIntrospection.GetCardModel(handItem);
+        if (cardModel is null)
+        {
+            return Error(command.CommandId, "Could not resolve CardModel.");
+        }
+
+        if (!BridgeIntrospection.IsCardPlayable(handItem))
+        {
+            return Error(command.CommandId, $"Card '{command.CardId}' is not playable.");
+        }
+
+        object? target = BridgeIntrospection.ResolveCommandTarget(command.TargetId, context.CombatState, context.Player);
+        if (!IsValidTarget(cardModel, target))
+        {
+            return Error(command.CommandId, $"Target '{command.TargetId ?? "<none>"}' is invalid.");
+        }
+
+        if (!TryManualPlay(cardModel, target))
+        {
+            return Error(command.CommandId, $"Card '{command.CardId}' could not be queued for play.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Queued card '{command.CardId}'.");
+    }
+
+    private static CommandResult ExecuteSelectChoice(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.ChoiceId))
+        {
+            return Error(command.CommandId, "select_choice requires choice_id.");
+        }
+
+        RunManager? runManager = RunManager.Instance;
+        RunState? runState = BridgeIntrospection.GetRunState(runManager);
+        if (runState is null)
+        {
+            return Error(command.CommandId, "Run context unavailable.");
+        }
+
+        if (!BridgeIntrospection.TrySelectChoice(runState, command.ChoiceId))
+        {
+            return Error(command.CommandId, $"Choice '{command.ChoiceId}' could not be selected.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Selected choice '{command.ChoiceId}'.");
+    }
+
+    private static CommandResult ExecuteSelectCard(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.CardId))
+        {
+            return Error(command.CommandId, "select_card requires card_id.");
+        }
+
+        if (!BridgeIntrospection.TrySelectCard(command.CardId))
+        {
+            return Error(command.CommandId, $"Card '{command.CardId}' could not be selected.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Selected card '{command.CardId}'.");
+    }
+
+    private static CommandResult ExecuteProceed(BridgeCommand command)
+    {
+        RunManager? runManager = RunManager.Instance;
+        RunState? runState = BridgeIntrospection.GetRunState(runManager);
+        if (runState is null)
+        {
+            return Error(command.CommandId, "Run context unavailable.");
+        }
+
+        if (!BridgeIntrospection.TryProceed(runState))
+        {
+            return Error(command.CommandId, "Proceed is not available.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, "Proceed triggered.");
+    }
+
+    private static CommandResult ExecuteTakeReward(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.RewardId))
+        {
+            return Error(command.CommandId, "take_reward requires reward_id.");
+        }
+
+        if (!BridgeIntrospection.TryTakeReward(command.RewardId))
+        {
+            return Error(command.CommandId, $"Reward '{command.RewardId}' could not be taken.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Took reward '{command.RewardId}'.");
+    }
+
+    private static CommandResult ExecuteSkipReward(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.RewardId))
+        {
+            return Error(command.CommandId, "skip_reward requires reward_id.");
+        }
+
+        if (!BridgeIntrospection.TrySkipReward(command.RewardId))
+        {
+            return Error(command.CommandId, $"Reward '{command.RewardId}' could not be skipped.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Skipped reward '{command.RewardId}'.");
+    }
+
+    private static CommandResult ExecuteSelectMapPoint(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.PointId))
+        {
+            return Error(command.CommandId, "select_map_point requires point_id.");
+        }
+
+        RunManager? runManager = RunManager.Instance;
+        RunState? runState = BridgeIntrospection.GetRunState(runManager);
+        if (runState is null)
+        {
+            return Error(command.CommandId, "Run context unavailable.");
+        }
+
+        if (!BridgeIntrospection.TrySelectMapPoint(runState, command.PointId))
+        {
+            return Error(command.CommandId, $"Map point '{command.PointId}' could not be selected.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Selected map point '{command.PointId}'.");
+    }
+
+    private static BridgeContext? BuildContext()
+    {
+        RunManager? runManager = RunManager.Instance;
+        CombatManager? combatManager = CombatManager.Instance;
+        RunState? runState = BridgeIntrospection.GetRunState(runManager);
+        CombatState? combatState = BridgeIntrospection.GetCombatState(runState);
+        Player? player = BridgeIntrospection.GetPrimaryPlayer(combatState, runState);
+
+        if (runManager is null || combatManager is null || combatState is null || player is null)
+        {
+            return null;
+        }
+
+        return new BridgeContext
+        {
+            RunManager = runManager,
+            CombatManager = combatManager,
+            CombatState = combatState,
+            Player = player,
+        };
+    }
+
+    private static bool IsWaitingForInput(RunManager runManager, CombatManager combatManager)
+    {
+        if (!combatManager.IsInProgress || !combatManager.IsPlayPhase || combatManager.PlayerActionsDisabled)
+        {
+            return false;
+        }
+
+        return runManager.ActionExecutor is not { IsRunning: true, CurrentlyRunningAction: not null };
+    }
+
+    private static bool TryEnqueueAction(RunManager runManager, object action)
+    {
+        object? synchronizer = runManager.GetType().GetProperty("ActionQueueSynchronizer")?.GetValue(runManager);
+        MethodInfo? requestEnqueue = synchronizer?.GetType().GetMethod("RequestEnqueue", BindingFlags.Instance | BindingFlags.Public);
+        if (synchronizer is null || requestEnqueue is null)
+        {
+            return false;
+        }
+
+        requestEnqueue.Invoke(synchronizer, new[] { action });
+        return true;
+    }
+
+    private static bool TryManualPlay(CardModel cardModel, object? target)
+    {
+        MethodInfo? method = cardModel.GetType().GetMethod("TryManualPlay", BindingFlags.Instance | BindingFlags.Public);
+        if (method?.Invoke(cardModel, new[] { target }) is bool played)
+        {
+            return played;
+        }
+
+        return false;
+    }
+
+    private static bool IsValidTarget(CardModel cardModel, object? target)
+    {
+        MethodInfo? method = cardModel.GetType().GetMethod("IsValidTarget", BindingFlags.Instance | BindingFlags.Public);
+        if (method is null)
+        {
+            return target is null;
+        }
+
+        if (method.Invoke(cardModel, new[] { target }) is bool valid)
+        {
+            return valid;
+        }
+
+        return target is null;
+    }
+
+    private static void WriteResult(CommandResult result)
+    {
+        Directory.CreateDirectory(StateExporter.StateDirectoryPath);
+        string payload = JsonSerializer.Serialize(result, JsonOptions);
+        File.WriteAllText(ResultFilePath, payload);
+    }
+
+    private static void DeleteCommandFile()
+    {
+        try
+        {
+            if (File.Exists(CommandFilePath))
+            {
+                File.Delete(CommandFilePath);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static CommandResult Success(string? commandId, string message)
+    {
+        return new CommandResult
+        {
+            CommandId = commandId,
+            Status = "ok",
+            Message = message,
+            ProcessedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+        };
+    }
+
+    private static CommandResult Error(string? commandId, string message)
+    {
+        return new CommandResult
+        {
+            CommandId = commandId,
+            Status = "error",
+            Message = message,
+            ProcessedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+        };
+    }
+}
+
+internal sealed record BridgeCommand
+{
+    [property: JsonPropertyName("command_id")]
+    public required string? CommandId { get; init; }
+
+    [property: JsonPropertyName("type")]
+    public required string Type { get; init; }
+
+    [property: JsonPropertyName("card_id")]
+    public string? CardId { get; init; }
+
+    [property: JsonPropertyName("target_id")]
+    public string? TargetId { get; init; }
+
+    [property: JsonPropertyName("choice_id")]
+    public string? ChoiceId { get; init; }
+
+    [property: JsonPropertyName("point_id")]
+    public string? PointId { get; init; }
+
+    [property: JsonPropertyName("reward_id")]
+    public string? RewardId { get; init; }
+}
+
+internal sealed record CommandResult
+{
+    [property: JsonPropertyName("command_id")]
+    public required string? CommandId { get; init; }
+
+    [property: JsonPropertyName("status")]
+    public required string Status { get; init; }
+
+    [property: JsonPropertyName("message")]
+    public required string Message { get; init; }
+
+    [property: JsonPropertyName("processed_at")]
+    public required string ProcessedAt { get; init; }
+}
+
+internal sealed record BridgeContext
+{
+    public required RunManager RunManager { get; init; }
+    public required CombatManager CombatManager { get; init; }
+    public required CombatState CombatState { get; init; }
+    public required Player Player { get; init; }
+}

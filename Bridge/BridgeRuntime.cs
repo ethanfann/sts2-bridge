@@ -51,9 +51,11 @@ internal static partial class BridgeRuntime
     private sealed partial class BridgeNode : Node
     {
         private const double FallbackPollSeconds = 3.0;
+        private const double CommandPollSeconds = 0.1;
         private const double DebounceSeconds = 0.15;
         private string? _lastStableStateJson;
         private double _elapsedSeconds;
+        private double _commandElapsedSeconds;
         private double _pendingElapsedSeconds;
         private bool _exportRequested;
         private int _errorCount;
@@ -68,6 +70,13 @@ internal static partial class BridgeRuntime
         public override void _Process(double delta)
         {
             _elapsedSeconds += delta;
+            _commandElapsedSeconds += delta;
+
+            if (_commandElapsedSeconds >= CommandPollSeconds)
+            {
+                _commandElapsedSeconds = 0;
+                CommandProcessor.ProcessPendingCommand();
+            }
 
             if (_exportRequested)
             {

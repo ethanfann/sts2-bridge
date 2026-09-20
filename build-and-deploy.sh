@@ -1,124 +1,79 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf 'This WSL script is disabled. Use build-and-deploy.cmd or build-and-deploy.ps1 from Windows PowerShell.\n' >&2
-exit 1
+PROJECT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+DIST_DIR="$PROJECT_DIR/dist/linux"
+GAME_DIR="$HOME/.local/share/Steam/steamapps/common/Slay the Spire 2"
+ACTION=build
 
-PROJECT_NAME="FirstMod"
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIST_DIR="$PROJECT_DIR/dist"
-GAME_DIR_DEFAULT="/mnt/c/Program Files (x86)/Steam/steamapps/common/Slay the Spire 2"
-GODOT_EXE_DEFAULT="/mnt/c/Users/ecfan/Downloads/Godot_v4.5.1-stable_mono_win64/Godot_v4.5.1-stable_mono_win64/Godot_v4.5.1-stable_mono_win64_console.exe"
-GAME_DIR="${STS2_GAME_DIR:-$GAME_DIR_DEFAULT}"
-MOD_DIR="${STS2_MOD_DIR:-$GAME_DIR/mods/$PROJECT_NAME}"
-GAME_DLL="$GAME_DIR/data_sts2_windows_x86_64/sts2.dll"
+usage() {
+  cat <<'EOF'
+Usage: ./build-and-deploy.sh [build|install|smoke] [--game-dir PATH]
 
-find_godot() {
-  if [[ -f "$GODOT_EXE_DEFAULT" ]]; then
-    printf '%s\n' "$GODOT_EXE_DEFAULT"
-    return
-  fi
+  build    Build a DLL-only package in dist/linux (default; does not install).
+  install  Install the existing dist/linux package into the game's mods folder.
+  smoke    Test the existing package in a disposable, offline sandbox.
 
-  printf '%s\n' ""
+Requires a .NET 9 SDK for build, Python 3 and bubblewrap for smoke.
+Use --game-dir for a non-default Steam library. Windows scripts are unchanged.
+EOF
 }
 
-require_file() {
-  local path="$1"
-  local label="$2"
-
-  if [[ ! -f "$path" ]]; then
-    printf 'Missing %s: %s\n' "$label" "$path" >&2
-    exit 1
-  fi
-}
-
-run_windows_godot() {
-  local exe_win="$1"
+if [[ ${1:-} == build || ${1:-} == install || ${1:-} == smoke ]]; then
+  ACTION="$1"
   shift
-
-  if ! command -v powershell.exe >/dev/null 2>&1; then
-    printf 'powershell.exe not found from WSL. Enable WSL Windows interop or run from PowerShell.\n' >&2
-    exit 1
-  fi
-
-  local ps_script
-  ps_script="$1"
-  powershell.exe -NoProfile -Command "$ps_script"
-}
-
-copy_artifact() {
-  local from="$1"
-  local to="$2"
-
-  require_file "$from" "artifact"
-  cp "$from" "$to"
-}
-
-require_file "$PROJECT_DIR/mod_manifest.json" "mod manifest"
-require_file "$PROJECT_DIR/FirstMod.csproj" "csproj"
-require_file "$PROJECT_DIR/export_presets.cfg" "export preset"
-require_file "$GAME_DLL" "game sts2.dll"
-
-if ! grep -q '"pck_name": "FirstMod"' "$PROJECT_DIR/mod_manifest.json"; then
-  printf 'Manifest must contain: "pck_name": "FirstMod"\n' >&2
-  exit 1
 fi
-
-if ! grep -q 'Godot.NET.Sdk/4.5.1' "$PROJECT_DIR/FirstMod.csproj"; then
-  printf 'Warning: FirstMod.csproj is not pinned to Godot.NET.Sdk/4.5.1\n' >&2
-fi
-
-if ! command -v wslpath >/dev/null 2>&1; then
-  printf 'This script expects WSL bash with wslpath available.\n' >&2
-  exit 1
-fi
-
-GODOT_EXE_RESOLVED="$(find_godot)"
-if [[ -z "$GODOT_EXE_RESOLVED" ]]; then
-  printf 'Godot 4.5.1 mono exe not found: %s\n' "$GODOT_EXE_DEFAULT" >&2
-  exit 1
-fi
-
-GODOT_EXE_WIN="$(wslpath -w "$GODOT_EXE_RESOLVED")"
-PROJECT_WIN="$(wslpath -w "$PROJECT_DIR")"
-PCK_WIN="$(wslpath -w "$DIST_DIR/$PROJECT_NAME.pck")"
-
-printf 'Using Godot: %s\n' "$GODOT_EXE_RESOLVED"
-printf 'Using game dir: %s\n' "$GAME_DIR"
-
-mkdir -p "$DIST_DIR"
-rm -f "$DIST_DIR/$PROJECT_NAME.dll" "$DIST_DIR/$PROJECT_NAME.pck" "$DIST_DIR/$PROJECT_NAME.json"
-cp "$GAME_DLL" "$PROJECT_DIR/sts2.dll"
-
-run_windows_godot "$GODOT_EXE_WIN" "& '$GODOT_EXE_WIN' --headless --path '$PROJECT_WIN' --build-solutions --quit; exit \$LASTEXITCODE"
-run_windows_godot "$GODOT_EXE_WIN" "& '$GODOT_EXE_WIN' --headless --path '$PROJECT_WIN' --export-pack 'Windows Desktop' '$PCK_WIN' --quit; exit \$LASTEXITCODE"
-
-DLL_SOURCE=""
-for candidate in \
-  "$PROJECT_DIR/.godot/mono/temp/bin/ExportDebug/win-x64/$PROJECT_NAME.dll" \
-  "$PROJECT_DIR/.godot/mono/temp/bin/Debug/win-x64/$PROJECT_NAME.dll" \
-  "$PROJECT_DIR/.godot/mono/temp/bin/Debug/$PROJECT_NAME.dll"
-do
-  if [[ -f "$candidate" ]]; then
-    DLL_SOURCE="$candidate"
-    break
-  fi
+while (($#)); do
+  case "$1" in
+    --game-dir)
+      [[ $# -ge 2 && -n "$2" ]] || { usage >&2; exit 2; }
+      GAME_DIR="$2"
+      shift 2
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
 done
 
-if [[ -z "$DLL_SOURCE" ]]; then
-  printf 'Could not find built DLL output.\n' >&2
-  exit 1
-fi
+require_file() {
+  [[ -f "$1" ]] || { printf 'Missing file: %s\n' "$1" >&2; exit 1; }
+}
 
-copy_artifact "$DLL_SOURCE" "$DIST_DIR/$PROJECT_NAME.dll"
-copy_artifact "$PROJECT_DIR/mod_manifest.json" "$DIST_DIR/$PROJECT_NAME.json"
+require_file "$GAME_DIR/data_sts2_linuxbsd_x86_64/sts2.dll"
+require_file "$GAME_DIR/data_sts2_linuxbsd_x86_64/0Harmony.dll"
+GAME_DIR="$(realpath "$GAME_DIR")"
 
-mkdir -p "$MOD_DIR"
-copy_artifact "$DIST_DIR/$PROJECT_NAME.dll" "$MOD_DIR/$PROJECT_NAME.dll"
-copy_artifact "$DIST_DIR/$PROJECT_NAME.pck" "$MOD_DIR/$PROJECT_NAME.pck"
-copy_artifact "$DIST_DIR/$PROJECT_NAME.json" "$MOD_DIR/$PROJECT_NAME.json"
-
-printf 'Built and deployed %s\n' "$PROJECT_NAME"
-printf 'DLL: %s\n' "$MOD_DIR/$PROJECT_NAME.dll"
-printf 'PCK: %s\n' "$MOD_DIR/$PROJECT_NAME.pck"
-printf 'JSON: %s\n' "$MOD_DIR/$PROJECT_NAME.json"
+case "$ACTION" in
+  build)
+    if ! command -v dotnet >/dev/null || [[ -z "$(dotnet --list-sdks)" ]]; then
+      printf 'A .NET 9 SDK is required. With mise: mise install dotnet@9; mise exec dotnet@9 -- ./build-and-deploy.sh build\n' >&2
+      exit 1
+    fi
+    # Do not leave an older package installable if compilation fails.
+    rm -f "$DIST_DIR/FirstMod.dll" "$DIST_DIR/FirstMod.json"
+    dotnet build "$PROJECT_DIR/FirstMod.csproj" --configuration Release \
+      "-p:GameDataDir=$GAME_DIR/data_sts2_linuxbsd_x86_64"
+    mkdir -p "$DIST_DIR"
+    install -m 644 "$PROJECT_DIR/.godot/mono/temp/bin/Release/FirstMod.dll" "$DIST_DIR/FirstMod.dll"
+    install -m 644 "$PROJECT_DIR/mod_manifest.json" "$DIST_DIR/FirstMod.json"
+    printf 'Built DLL-only package: %s\nNo game files were changed.\n' "$DIST_DIR"
+    ;;
+  install)
+    require_file "$DIST_DIR/FirstMod.dll"
+    require_file "$DIST_DIR/FirstMod.json"
+    if pgrep -x SlayTheSpire2 >/dev/null; then
+      printf 'Close Slay the Spire 2 before installing the mod.\n' >&2
+      exit 1
+    fi
+    MOD_DIR="$GAME_DIR/mods/FirstMod"
+    mkdir -p "$MOD_DIR"
+    install -m 644 "$DIST_DIR/FirstMod.dll" "$MOD_DIR/FirstMod.dll"
+    install -m 644 "$DIST_DIR/FirstMod.json" "$MOD_DIR/FirstMod.json"
+    printf 'Installed: %s\nEnable mods in the game and restart if prompted.\n' "$MOD_DIR"
+    ;;
+  smoke)
+    require_file "$DIST_DIR/FirstMod.dll"
+    require_file "$DIST_DIR/FirstMod.json"
+    exec python3 "$PROJECT_DIR/tests/smoke.py" --game-dir "$GAME_DIR" --package-dir "$DIST_DIR"
+    ;;
+esac

@@ -51,7 +51,7 @@ internal static class StateExporter
         {
             ProtocolVersion = 1,
             Scene = DetermineScene(runManager, combatManager, runState, combatState, cardSelection, relicSelection, merchant, rewards, treasure, restSite, map),
-            WaitingForInput = DetermineWaitingForInput(runManager, combatManager, choices.Count, cardSelection, relicSelection, merchant, rewards, treasure, restSite, proceedContext, map),
+            WaitingForInput = DetermineWaitingForInput(runManager, combatManager, playerCombatState, choices.Count, cardSelection, relicSelection, merchant, rewards, treasure, restSite, proceedContext, map),
             Run = BuildRunSnapshot(runState),
             Player = BuildPlayerSnapshot(player),
             Enemies = BuildEnemySnapshots(combatState),
@@ -186,6 +186,7 @@ internal static class StateExporter
     private static bool DetermineWaitingForInput(
         RunManager? runManager,
         CombatManager? combatManager,
+        PlayerCombatState? playerCombatState,
         int choiceCount,
         CardSelectionContextSnapshot? cardSelection,
         RelicSelectionContextSnapshot? relicSelection,
@@ -246,7 +247,7 @@ internal static class StateExporter
             return false;
         }
 
-        if (!combatManager.IsInProgress || !combatManager.IsPlayPhase || combatManager.PlayerActionsDisabled)
+        if (!combatManager.IsInProgress || playerCombatState?.Phase != PlayerTurnPhase.Play || combatManager.PlayerActionsDisabled)
         {
             return false;
         }

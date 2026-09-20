@@ -57,8 +57,8 @@ internal static class ExportHooks
         }
     }
 
-    [HarmonyPatch(typeof(RunManager), "AfterLocationChanged")]
-    private static class RunManagerAfterLocationChangedPatch
+    [HarmonyPatch(typeof(RunManager), "AfterMapLocationChanged")]
+    private static class RunManagerAfterMapLocationChangedPatch
     {
         [HarmonyPostfix]
         private static void Postfix()
@@ -392,8 +392,8 @@ internal static class ExportHooks
         }
     }
 
-    [HarmonyPatch(typeof(NRewardsScreen), "SetRewards")]
-    private static class NRewardsScreenSetRewardsPatch
+    [HarmonyPatch(typeof(NRewardsScreen), "_Ready")]
+    private static class NRewardsScreenReadyPatch
     {
         [HarmonyPostfix]
         private static void Postfix()
@@ -502,8 +502,8 @@ internal static class ExportHooks
         }
     }
 
-    [HarmonyPatch(typeof(NMerchantSlot), "OnReleased")]
-    private static class NMerchantSlotOnReleasedPatch
+    [HarmonyPatch(typeof(NMerchantSlot), "OnSelected")]
+    private static class NMerchantSlotOnSelectedPatch
     {
         [HarmonyPostfix]
         private static void Postfix()
@@ -697,6 +697,16 @@ internal static class ExportHooks
 
     [HarmonyPatch(typeof(PlayerCombatState), "set_Energy")]
     private static class PlayerCombatStateEnergyPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerCombatState), "set_Phase")]
+    private static class PlayerCombatStatePhasePatch
     {
         [HarmonyPostfix]
         private static void Postfix()

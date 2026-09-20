@@ -5,7 +5,8 @@
   "author": "doctornoodlearms",
   "description": "",
   "version": "1.0.0",
-  "has_pck": true,
+  "min_game_version": "0.107.1",
+  "has_pck": false,
   "has_dll": true,
   "dependencies": [],
   "affects_gameplay": true

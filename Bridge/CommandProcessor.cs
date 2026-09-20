@@ -134,7 +134,7 @@ internal static class CommandProcessor
             return Error(command.CommandId, "Combat context unavailable.");
         }
 
-        if (!IsWaitingForInput(context.RunManager, context.CombatManager))
+        if (!IsWaitingForInput(context.RunManager, context.CombatManager, context.Player.PlayerCombatState))
         {
             return Error(command.CommandId, "Combat is not waiting for player input.");
         }
@@ -170,7 +170,7 @@ internal static class CommandProcessor
             return Error(command.CommandId, "Combat context unavailable.");
         }
 
-        if (!IsWaitingForInput(context.RunManager, context.CombatManager))
+        if (!IsWaitingForInput(context.RunManager, context.CombatManager, context.Player.PlayerCombatState))
         {
             return Error(command.CommandId, "Combat is not waiting for player input.");
         }
@@ -415,7 +415,7 @@ internal static class CommandProcessor
             return Error(command.CommandId, "Combat context unavailable.");
         }
 
-        if (!IsWaitingForInput(context.RunManager, context.CombatManager))
+        if (!IsWaitingForInput(context.RunManager, context.CombatManager, context.Player.PlayerCombatState))
         {
             return Error(command.CommandId, "Combat is not waiting for player input.");
         }
@@ -456,9 +456,9 @@ internal static class CommandProcessor
         };
     }
 
-    private static bool IsWaitingForInput(RunManager runManager, CombatManager combatManager)
+    private static bool IsWaitingForInput(RunManager runManager, CombatManager combatManager, PlayerCombatState? playerCombatState)
     {
-        if (!combatManager.IsInProgress || !combatManager.IsPlayPhase || combatManager.PlayerActionsDisabled)
+        if (!combatManager.IsInProgress || playerCombatState?.Phase != PlayerTurnPhase.Play || combatManager.PlayerActionsDisabled)
         {
             return false;
         }

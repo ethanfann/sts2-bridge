@@ -376,7 +376,7 @@ internal static class BridgeIntrospection
             {
                 Id = BuildPotionId(title, index),
                 Title = title,
-                Description = GetRawLocalizedText(potion.Description),
+                Description = GetLocalizedText(potion.DynamicDescription),
                 Rarity = potion.Rarity.ToString(),
                 Usage = potion.Usage.ToString(),
                 TargetType = potion.TargetType.ToString(),

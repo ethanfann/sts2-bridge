@@ -35,24 +35,34 @@ internal static class StateExporter
         Player? player = BridgeIntrospection.GetPrimaryPlayer(combatState, runState);
         PlayerCombatState? playerCombatState = player?.PlayerCombatState;
         CardSelectionContextSnapshot? cardSelection = BridgeIntrospection.BuildCardSelectionContext();
-        RewardContextSnapshot? rewards = cardSelection is null ? BridgeIntrospection.BuildRewardContext() : null;
+        RelicSelectionContextSnapshot? relicSelection = cardSelection is null ? BridgeIntrospection.BuildRelicSelectionContext() : null;
         MapContextSnapshot? map = BridgeIntrospection.BuildMapContext(runState);
-        bool shouldExportEventChoices = cardSelection is null && rewards is null && map is null;
+        MerchantContextSnapshot? merchant = cardSelection is null && relicSelection is null && map is null ? BridgeIntrospection.BuildMerchantContext() : null;
+        RewardContextSnapshot? rewards = cardSelection is null && relicSelection is null && map is null ? BridgeIntrospection.BuildRewardContext() : null;
+        TreasureContextSnapshot? treasure = cardSelection is null && relicSelection is null && merchant is null && rewards is null && map is null ? BridgeIntrospection.BuildTreasureContext() : null;
+        RestSiteContextSnapshot? restSite = cardSelection is null && relicSelection is null && merchant is null && rewards is null && treasure is null && map is null ? BridgeIntrospection.BuildRestSiteContext(runState) : null;
+        bool shouldExportEventChoices = cardSelection is null && relicSelection is null && merchant is null && rewards is null && treasure is null && restSite is null && map is null;
         List<ChoiceSnapshot> choices = shouldExportEventChoices ? BridgeIntrospection.BuildChoiceSnapshots(runState) : [];
         ChoiceContextSnapshot? choiceContext = shouldExportEventChoices ? BridgeIntrospection.BuildChoiceContext(runState) : null;
         ProceedContextSnapshot? proceedContext = BridgeIntrospection.BuildProceedContext(runState, choices.Count, cardSelection);
+        List<PotionSnapshot> potions = BridgeIntrospection.BuildPotionSnapshots(player);
 
         return new StableBridgeSnapshot
         {
             ProtocolVersion = 1,
-            Scene = DetermineScene(runManager, combatManager, runState, combatState, cardSelection, rewards, map),
-            WaitingForInput = DetermineWaitingForInput(runManager, combatManager, choices.Count, cardSelection, rewards, proceedContext, map),
+            Scene = DetermineScene(runManager, combatManager, runState, combatState, cardSelection, relicSelection, merchant, rewards, treasure, restSite, map),
+            WaitingForInput = DetermineWaitingForInput(runManager, combatManager, choices.Count, cardSelection, relicSelection, merchant, rewards, treasure, restSite, proceedContext, map),
             Run = BuildRunSnapshot(runState),
             Player = BuildPlayerSnapshot(player),
             Enemies = BuildEnemySnapshots(combatState),
             Hand = BuildHandSnapshots(playerCombatState),
+            Potions = potions,
             CardSelection = cardSelection,
+            RelicSelection = relicSelection,
+            Merchant = merchant,
             Rewards = rewards,
+            Treasure = treasure,
+            RestSite = restSite,
             Map = map,
             ChoiceContext = choiceContext,
             ProceedContext = proceedContext,
@@ -82,8 +92,13 @@ internal static class StateExporter
             Player = stableSnapshot.Player,
             Enemies = stableSnapshot.Enemies,
             Hand = stableSnapshot.Hand,
+            Potions = stableSnapshot.Potions,
             CardSelection = stableSnapshot.CardSelection,
+            RelicSelection = stableSnapshot.RelicSelection,
+            Merchant = stableSnapshot.Merchant,
             Rewards = stableSnapshot.Rewards,
+            Treasure = stableSnapshot.Treasure,
+            RestSite = stableSnapshot.RestSite,
             Map = stableSnapshot.Map,
             ChoiceContext = stableSnapshot.ChoiceContext,
             ProceedContext = stableSnapshot.ProceedContext,
@@ -113,7 +128,11 @@ internal static class StateExporter
         RunState? runState,
         CombatState? combatState,
         CardSelectionContextSnapshot? cardSelection,
+        RelicSelectionContextSnapshot? relicSelection,
+        MerchantContextSnapshot? merchant,
         RewardContextSnapshot? rewards,
+        TreasureContextSnapshot? treasure,
+        RestSiteContextSnapshot? restSite,
         MapContextSnapshot? map)
     {
         if (cardSelection is not null)
@@ -121,14 +140,34 @@ internal static class StateExporter
             return "card_selection";
         }
 
-        if (rewards is not null)
+        if (relicSelection is not null)
         {
-            return "rewards";
+            return "relic_selection";
         }
 
         if (map is not null)
         {
             return "map";
+        }
+
+        if (treasure is not null)
+        {
+            return "treasure";
+        }
+
+        if (restSite is not null)
+        {
+            return "rest_site";
+        }
+
+        if (merchant is not null)
+        {
+            return merchant.Kind == "inventory" ? "shop" : "merchant_room";
+        }
+
+        if (rewards is not null)
+        {
+            return "rewards";
         }
 
         if (combatManager?.IsInProgress == true && combatState is not null)
@@ -149,7 +188,11 @@ internal static class StateExporter
         CombatManager? combatManager,
         int choiceCount,
         CardSelectionContextSnapshot? cardSelection,
+        RelicSelectionContextSnapshot? relicSelection,
+        MerchantContextSnapshot? merchant,
         RewardContextSnapshot? rewards,
+        TreasureContextSnapshot? treasure,
+        RestSiteContextSnapshot? restSite,
         ProceedContextSnapshot? proceedContext,
         MapContextSnapshot? map)
     {
@@ -158,9 +201,29 @@ internal static class StateExporter
             return true;
         }
 
+        if (relicSelection is not null)
+        {
+            return true;
+        }
+
+        if (merchant is not null)
+        {
+            return merchant.EnterShopAvailable || merchant.LeaveAvailable || merchant.ProceedAvailable;
+        }
+
         if (rewards is not null)
         {
             return true;
+        }
+
+        if (treasure is not null)
+        {
+            return treasure.ChestOpenAvailable || treasure.ProceedAvailable || treasure.Relics.Count > 0;
+        }
+
+        if (restSite is not null)
+        {
+            return restSite.ProceedAvailable || restSite.Options.Count > 0;
         }
 
         if (map is not null)
@@ -217,6 +280,8 @@ internal static class StateExporter
 
         Creature? creature = player.Creature;
         PlayerCombatState? combatState = player.PlayerCombatState;
+        int? energy = TryGetCombatEnergy(combatState);
+        int maxEnergy = TryGetCombatMaxEnergy(combatState) ?? player.MaxEnergy;
 
         return new PlayerSnapshot
         {
@@ -224,8 +289,8 @@ internal static class StateExporter
             MaxHp = creature?.MaxHp,
             Block = creature?.Block,
             Gold = player.Gold,
-            Energy = combatState?.Energy,
-            MaxEnergy = combatState?.MaxEnergy ?? player.MaxEnergy,
+            Energy = energy,
+            MaxEnergy = maxEnergy,
             DeckCount = GetPileCount(player.Deck),
             RelicCount = CountEntries(player.Relics),
             PotionCount = CountEntries(player.Potions),
@@ -315,6 +380,40 @@ internal static class StateExporter
 
         return count;
     }
+
+    private static int? TryGetCombatEnergy(PlayerCombatState? combatState)
+    {
+        if (combatState is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return combatState.Energy;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static int? TryGetCombatMaxEnergy(PlayerCombatState? combatState)
+    {
+        if (combatState is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return combatState.MaxEnergy;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
 
 internal sealed record StableBridgeSnapshot
@@ -340,11 +439,26 @@ internal sealed record StableBridgeSnapshot
     [property: JsonPropertyName("hand")]
     public required List<CardSnapshot> Hand { get; init; }
 
+    [property: JsonPropertyName("potions")]
+    public required List<PotionSnapshot> Potions { get; init; }
+
     [property: JsonPropertyName("card_selection")]
     public required CardSelectionContextSnapshot? CardSelection { get; init; }
 
+    [property: JsonPropertyName("relic_selection")]
+    public required RelicSelectionContextSnapshot? RelicSelection { get; init; }
+
+    [property: JsonPropertyName("merchant")]
+    public required MerchantContextSnapshot? Merchant { get; init; }
+
     [property: JsonPropertyName("rewards")]
     public required RewardContextSnapshot? Rewards { get; init; }
+
+    [property: JsonPropertyName("treasure")]
+    public required TreasureContextSnapshot? Treasure { get; init; }
+
+    [property: JsonPropertyName("rest_site")]
+    public required RestSiteContextSnapshot? RestSite { get; init; }
 
     [property: JsonPropertyName("map")]
     public required MapContextSnapshot? Map { get; init; }
@@ -400,11 +514,26 @@ internal sealed record BridgeSnapshot
     [property: JsonPropertyName("hand")]
     public required List<CardSnapshot> Hand { get; init; }
 
+    [property: JsonPropertyName("potions")]
+    public required List<PotionSnapshot> Potions { get; init; }
+
     [property: JsonPropertyName("card_selection")]
     public required CardSelectionContextSnapshot? CardSelection { get; init; }
 
+    [property: JsonPropertyName("relic_selection")]
+    public required RelicSelectionContextSnapshot? RelicSelection { get; init; }
+
+    [property: JsonPropertyName("merchant")]
+    public required MerchantContextSnapshot? Merchant { get; init; }
+
     [property: JsonPropertyName("rewards")]
     public required RewardContextSnapshot? Rewards { get; init; }
+
+    [property: JsonPropertyName("treasure")]
+    public required TreasureContextSnapshot? Treasure { get; init; }
+
+    [property: JsonPropertyName("rest_site")]
+    public required RestSiteContextSnapshot? RestSite { get; init; }
 
     [property: JsonPropertyName("map")]
     public required MapContextSnapshot? Map { get; init; }
@@ -521,6 +650,27 @@ internal sealed record CardSnapshot
     public required bool Playable { get; init; }
 }
 
+internal sealed record PotionSnapshot
+{
+    [property: JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [property: JsonPropertyName("title")]
+    public required string Title { get; init; }
+
+    [property: JsonPropertyName("description")]
+    public required string Description { get; init; }
+
+    [property: JsonPropertyName("rarity")]
+    public required string Rarity { get; init; }
+
+    [property: JsonPropertyName("usage")]
+    public required string Usage { get; init; }
+
+    [property: JsonPropertyName("target_type")]
+    public required string TargetType { get; init; }
+}
+
 internal sealed record ChoiceSnapshot
 {
     [property: JsonPropertyName("id")]
@@ -587,6 +737,108 @@ internal sealed record CardSelectionContextSnapshot
     public required List<CardSnapshot> Cards { get; init; }
 }
 
+internal sealed record RelicSelectionContextSnapshot
+{
+    [property: JsonPropertyName("kind")]
+    public required string Kind { get; init; }
+
+    [property: JsonPropertyName("prompt")]
+    public required string Prompt { get; init; }
+
+    [property: JsonPropertyName("skip_available")]
+    public required bool SkipAvailable { get; init; }
+
+    [property: JsonPropertyName("relics")]
+    public required List<RelicSnapshot> Relics { get; init; }
+}
+
+internal sealed record RelicSnapshot
+{
+    [property: JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [property: JsonPropertyName("title")]
+    public required string Title { get; init; }
+
+    [property: JsonPropertyName("description")]
+    public required string Description { get; init; }
+
+    [property: JsonPropertyName("rarity")]
+    public required string Rarity { get; init; }
+}
+
+internal sealed record RestSiteContextSnapshot
+{
+    [property: JsonPropertyName("options")]
+    public required List<RestSiteOptionSnapshot> Options { get; init; }
+
+    [property: JsonPropertyName("proceed_available")]
+    public required bool ProceedAvailable { get; init; }
+}
+
+internal sealed record RestSiteOptionSnapshot
+{
+    [property: JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [property: JsonPropertyName("title")]
+    public required string Title { get; init; }
+
+    [property: JsonPropertyName("description")]
+    public required string Description { get; init; }
+
+    [property: JsonPropertyName("enabled")]
+    public required bool Enabled { get; init; }
+}
+
+internal sealed record MerchantContextSnapshot
+{
+    [property: JsonPropertyName("kind")]
+    public required string Kind { get; init; }
+
+    [property: JsonPropertyName("enter_shop_available")]
+    public required bool EnterShopAvailable { get; init; }
+
+    [property: JsonPropertyName("leave_available")]
+    public required bool LeaveAvailable { get; init; }
+
+    [property: JsonPropertyName("proceed_available")]
+    public required bool ProceedAvailable { get; init; }
+
+    [property: JsonPropertyName("items")]
+    public required List<MerchantItemSnapshot> Items { get; init; }
+}
+
+internal sealed record MerchantItemSnapshot
+{
+    [property: JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [property: JsonPropertyName("kind")]
+    public required string Kind { get; init; }
+
+    [property: JsonPropertyName("title")]
+    public required string Title { get; init; }
+
+    [property: JsonPropertyName("description")]
+    public required string Description { get; init; }
+
+    [property: JsonPropertyName("cost")]
+    public required int Cost { get; init; }
+
+    [property: JsonPropertyName("affordable")]
+    public required bool Affordable { get; init; }
+
+    [property: JsonPropertyName("purchasable")]
+    public required bool Purchasable { get; init; }
+
+    [property: JsonPropertyName("rarity")]
+    public required string? Rarity { get; init; }
+
+    [property: JsonPropertyName("on_sale")]
+    public required bool? OnSale { get; init; }
+}
+
 internal sealed record RewardContextSnapshot
 {
     [property: JsonPropertyName("proceed_enabled")]
@@ -594,6 +846,18 @@ internal sealed record RewardContextSnapshot
 
     [property: JsonPropertyName("rewards")]
     public required List<RewardSnapshot> Rewards { get; init; }
+}
+
+internal sealed record TreasureContextSnapshot
+{
+    [property: JsonPropertyName("chest_open_available")]
+    public required bool ChestOpenAvailable { get; init; }
+
+    [property: JsonPropertyName("proceed_available")]
+    public required bool ProceedAvailable { get; init; }
+
+    [property: JsonPropertyName("relics")]
+    public required List<RelicSnapshot> Relics { get; init; }
 }
 
 internal sealed record RewardSnapshot

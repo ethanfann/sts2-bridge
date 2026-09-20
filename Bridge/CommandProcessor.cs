@@ -98,16 +98,24 @@ internal static class CommandProcessor
     {
         try
         {
+            TraceRecorder.Log("command.received", ("type", command.Type), ("command_id", command.CommandId));
             return command.Type switch
             {
                 "end_turn" => ExecuteEndTurn(command),
+                "enter_merchant" => ExecuteEnterMerchant(command),
+                "leave_shop" => ExecuteLeaveShop(command),
+                "purchase_shop_item" => ExecutePurchaseShopItem(command),
                 "play_card" => ExecutePlayCard(command),
                 "proceed" => ExecuteProceed(command),
+                "select_rest_site_option" => ExecuteSelectRestSiteOption(command),
+                "open_treasure_chest" => ExecuteOpenTreasureChest(command),
+                "select_relic" => ExecuteSelectRelic(command),
                 "take_reward" => ExecuteTakeReward(command),
                 "skip_reward" => ExecuteSkipReward(command),
                 "select_map_point" => ExecuteSelectMapPoint(command),
                 "select_card" => ExecuteSelectCard(command),
                 "select_choice" => ExecuteSelectChoice(command),
+                "use_potion" => ExecuteUsePotion(command),
                 _ => Error(command.CommandId, $"Unsupported command type '{command.Type}'."),
             };
         }
@@ -199,6 +207,44 @@ internal static class CommandProcessor
         return Success(command.CommandId, $"Queued card '{command.CardId}'.");
     }
 
+    private static CommandResult ExecuteEnterMerchant(BridgeCommand command)
+    {
+        if (!BridgeIntrospection.TryEnterMerchant())
+        {
+            return Error(command.CommandId, "Merchant could not be opened.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, "Merchant opened.");
+    }
+
+    private static CommandResult ExecutePurchaseShopItem(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.ItemId))
+        {
+            return Error(command.CommandId, "purchase_shop_item requires item_id.");
+        }
+
+        if (!BridgeIntrospection.TryPurchaseMerchantItem(command.ItemId))
+        {
+            return Error(command.CommandId, $"Shop item '{command.ItemId}' could not be purchased.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Purchased shop item '{command.ItemId}'.");
+    }
+
+    private static CommandResult ExecuteLeaveShop(BridgeCommand command)
+    {
+        if (!BridgeIntrospection.TryLeaveMerchant())
+        {
+            return Error(command.CommandId, "Shop could not be closed.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, "Shop closed.");
+    }
+
     private static CommandResult ExecuteSelectChoice(BridgeCommand command)
     {
         if (string.IsNullOrEmpty(command.ChoiceId))
@@ -220,6 +266,29 @@ internal static class CommandProcessor
 
         BridgeRuntime.RequestExport();
         return Success(command.CommandId, $"Selected choice '{command.ChoiceId}'.");
+    }
+
+    private static CommandResult ExecuteSelectRestSiteOption(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.OptionId))
+        {
+            return Error(command.CommandId, "select_rest_site_option requires option_id.");
+        }
+
+        RunManager? runManager = RunManager.Instance;
+        RunState? runState = BridgeIntrospection.GetRunState(runManager);
+        if (runState is null)
+        {
+            return Error(command.CommandId, "Run context unavailable.");
+        }
+
+        if (!BridgeIntrospection.TrySelectRestSiteOption(runState, command.OptionId))
+        {
+            return Error(command.CommandId, $"Rest site option '{command.OptionId}' could not be selected.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Selected rest site option '{command.OptionId}'.");
     }
 
     private static CommandResult ExecuteSelectCard(BridgeCommand command)
@@ -254,6 +323,33 @@ internal static class CommandProcessor
 
         BridgeRuntime.RequestExport();
         return Success(command.CommandId, "Proceed triggered.");
+    }
+
+    private static CommandResult ExecuteOpenTreasureChest(BridgeCommand command)
+    {
+        if (!BridgeIntrospection.TryOpenTreasureChest())
+        {
+            return Error(command.CommandId, "Treasure chest could not be opened.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, "Treasure chest opened.");
+    }
+
+    private static CommandResult ExecuteSelectRelic(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.RelicId))
+        {
+            return Error(command.CommandId, "select_relic requires relic_id.");
+        }
+
+        if (!BridgeIntrospection.TrySelectRelic(command.RelicId))
+        {
+            return Error(command.CommandId, $"Relic '{command.RelicId}' could not be selected.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Selected relic '{command.RelicId}'.");
     }
 
     private static CommandResult ExecuteTakeReward(BridgeCommand command)
@@ -309,6 +405,33 @@ internal static class CommandProcessor
 
         BridgeRuntime.RequestExport();
         return Success(command.CommandId, $"Selected map point '{command.PointId}'.");
+    }
+
+    private static CommandResult ExecuteUsePotion(BridgeCommand command)
+    {
+        BridgeContext? context = BuildContext();
+        if (context is null)
+        {
+            return Error(command.CommandId, "Combat context unavailable.");
+        }
+
+        if (!IsWaitingForInput(context.RunManager, context.CombatManager))
+        {
+            return Error(command.CommandId, "Combat is not waiting for player input.");
+        }
+
+        if (string.IsNullOrEmpty(command.PotionId))
+        {
+            return Error(command.CommandId, "use_potion requires potion_id.");
+        }
+
+        if (!BridgeIntrospection.TryUsePotion(context.Player, context.CombatState, command.PotionId, command.TargetId))
+        {
+            return Error(command.CommandId, $"Potion '{command.PotionId}' could not be used.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Used potion '{command.PotionId}'.");
     }
 
     private static BridgeContext? BuildContext()
@@ -409,6 +532,7 @@ internal static class CommandProcessor
 
     private static CommandResult Success(string? commandId, string message)
     {
+        TraceRecorder.Log("command.success", ("command_id", commandId), ("message", message));
         return new CommandResult
         {
             CommandId = commandId,
@@ -420,6 +544,7 @@ internal static class CommandProcessor
 
     private static CommandResult Error(string? commandId, string message)
     {
+        TraceRecorder.Log("command.error", ("command_id", commandId), ("message", message));
         return new CommandResult
         {
             CommandId = commandId,
@@ -452,6 +577,18 @@ internal sealed record BridgeCommand
 
     [property: JsonPropertyName("reward_id")]
     public string? RewardId { get; init; }
+
+    [property: JsonPropertyName("item_id")]
+    public string? ItemId { get; init; }
+
+    [property: JsonPropertyName("option_id")]
+    public string? OptionId { get; init; }
+
+    [property: JsonPropertyName("relic_id")]
+    public string? RelicId { get; init; }
+
+    [property: JsonPropertyName("potion_id")]
+    public string? PotionId { get; init; }
 }
 
 internal sealed record CommandResult

@@ -6,13 +6,18 @@ using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
+using MegaCrit.Sts2.Core.Nodes.RestSite;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic;
+using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 using MegaCrit.Sts2.Core.Runs;
 
 namespace FirstMod.Bridge;
@@ -39,6 +44,11 @@ internal static class ExportHooks
         BridgeRuntime.RequestExport();
     }
 
+    private static void Trace(string eventName, params (string Key, object? Value)[] fields)
+    {
+        TraceRecorder.Log(eventName, fields);
+    }
+
     private static void QueueExportIfCombat()
     {
         if (CombatManager.Instance?.IsInProgress == true)
@@ -53,6 +63,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("run.after_location_changed");
             QueueExport();
         }
     }
@@ -63,6 +74,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("combat.setup");
             QueueExport();
         }
     }
@@ -73,6 +85,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("event.set_options");
             QueueExport();
         }
     }
@@ -83,6 +96,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("event.refresh_state");
             QueueExport();
         }
     }
@@ -93,6 +107,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("event.option_clicked");
             QueueExport();
         }
     }
@@ -103,6 +118,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("event.proceed");
             QueueExport();
         }
     }
@@ -113,6 +129,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("card_selection.deck_transform_show");
             QueueExport();
         }
     }
@@ -123,6 +140,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("card_selection.deck_select_create");
             QueueExport();
         }
     }
@@ -133,7 +151,61 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("card_selection.choose_a_card_show");
             QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantRoom), "HideScreen")]
+    private static class NMerchantRoomHideScreenPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(object? _)
+        {
+            Trace("merchant.hide_screen");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantRoom), "AfterRoomIsLoaded")]
+    private static class NMerchantRoomAfterRoomIsLoadedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("merchant.after_room_loaded");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantRoom), "OnActiveScreenUpdated")]
+    private static class NMerchantRoomOnActiveScreenUpdatedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("merchant.active_screen_updated");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NProceedButton), "OnPress")]
+    private static class NProceedButtonOnPressPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(NProceedButton __instance)
+        {
+            Trace("proceed_button.press", ("is_skip", __instance.IsSkip));
+        }
+    }
+
+    [HarmonyPatch(typeof(NProceedButton), "OnRelease")]
+    private static class NProceedButtonOnReleasePatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(NProceedButton __instance)
+        {
+            Trace("proceed_button.release", ("is_skip", __instance.IsSkip));
         }
     }
 
@@ -143,6 +215,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("map.open");
             QueueExport();
         }
     }
@@ -153,6 +226,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("map.set_map");
             QueueExport();
         }
     }
@@ -163,6 +237,7 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            Trace("map.set_travel_enabled");
             QueueExport();
         }
     }
@@ -357,6 +432,209 @@ internal static class ExportHooks
         }
     }
 
+    [HarmonyPatch(typeof(NMerchantRoom), "Create")]
+    private static class NMerchantRoomCreatePatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantRoom), "OpenInventory")]
+    private static class NMerchantRoomOpenInventoryPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantRoom), "OnMerchantOpened")]
+    private static class NMerchantRoomOnMerchantOpenedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantInventory), "Open")]
+    private static class NMerchantInventoryOpenPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantInventory), "Close")]
+    private static class NMerchantInventoryClosePatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantInventory), "OnPurchaseCompleted")]
+    private static class NMerchantInventoryOnPurchaseCompletedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantInventory), "OnCardRemovalUsed")]
+    private static class NMerchantInventoryOnCardRemovalUsedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NMerchantSlot), "OnReleased")]
+    private static class NMerchantSlotOnReleasedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            QueueExport();
+        }
+    }
+
+
+    [HarmonyPatch(typeof(NRestSiteRoom), "UpdateRestSiteOptions")]
+    private static class NRestSiteRoomUpdateRestSiteOptionsPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("rest_site.update_options");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NRestSiteButton), "OnRelease")]
+    private static class NRestSiteButtonOnReleasePatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(NRestSiteButton __instance)
+        {
+            Trace("rest_site.option_released", ("option", __instance.Option?.OptionId));
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NRestSiteRoom), "OnAfterPlayerSelectedRestSiteOption")]
+    private static class NRestSiteRoomOnAfterPlayerSelectedRestSiteOptionPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(RestSiteOption option, bool success, int playerId)
+        {
+            Trace("rest_site.option_selected", ("option", option.OptionId), ("success", success), ("player_id", playerId));
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NRestSiteRoom), "OnProceedButtonReleased")]
+    private static class NRestSiteRoomOnProceedButtonReleasedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("rest_site.proceed");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NTreasureRoom), "OpenChest")]
+    private static class NTreasureRoomOpenChestPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("treasure.open_chest");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NTreasureRoom), "OnChestButtonReleased")]
+    private static class NTreasureRoomOnChestButtonReleasedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("treasure.chest_button_released");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NTreasureRoomRelicHolder), "OnRelease")]
+    private static class NTreasureRoomRelicHolderOnReleasePatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(NTreasureRoomRelicHolder __instance)
+        {
+            Trace("treasure.relic_released", ("relic", __instance.Relic));
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NTreasureRoom), "OnProceedButtonReleased")]
+    private static class NTreasureRoomOnProceedButtonReleasedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("treasure.proceed");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NChooseARelicSelection), "ShowScreen")]
+    private static class NChooseARelicSelectionShowScreenPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("relic_selection.show");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NChooseARelicSelection), "SelectHolder")]
+    private static class NChooseARelicSelectionSelectHolderPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("relic_selection.select_holder");
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(NChooseARelicSelection), "RelicsSelected")]
+    private static class NChooseARelicSelectionRelicsSelectedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            Trace("relic_selection.completed");
+            QueueExport();
+        }
+    }
+
+
     [HarmonyPatch(typeof(NRewardButton), "OnRelease")]
     private static class NRewardButtonOnReleasePatch
     {
@@ -433,6 +711,28 @@ internal static class ExportHooks
         [HarmonyPostfix]
         private static void Postfix()
         {
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(PotionModel), "OnUseWrapper")]
+    private static class PotionModelOnUseWrapperPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(PotionModel __instance)
+        {
+            Trace("potion.used", ("title", __instance.Title));
+            QueueExport();
+        }
+    }
+
+    [HarmonyPatch(typeof(PotionModel), "RemoveBeforeUse")]
+    private static class PotionModelRemoveBeforeUsePatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(PotionModel __instance)
+        {
+            Trace("potion.remove_before_use", ("title", __instance.Title));
             QueueExport();
         }
     }

@@ -5,13 +5,19 @@ using System.Globalization;
 using System.Reflection;
 using Godot;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
+using MegaCrit.Sts2.Core.Nodes.RestSite;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic;
+using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Runs;
 
@@ -126,10 +132,34 @@ internal static class BridgeIntrospection
             return "card_selection";
         }
 
+        RelicSelectionContextSnapshot? relicSelection = BuildRelicSelectionContext();
+        if (relicSelection is not null)
+        {
+            return "relic_selection";
+        }
+
         RewardContextSnapshot? rewards = BuildRewardContext();
         if (rewards is not null)
         {
             return "rewards";
+        }
+
+        TreasureContextSnapshot? treasure = BuildTreasureContext();
+        if (treasure is not null)
+        {
+            return "treasure";
+        }
+
+        RestSiteContextSnapshot? restSite = BuildRestSiteContext(runState);
+        if (restSite is not null)
+        {
+            return "rest_site";
+        }
+
+        MerchantContextSnapshot? merchant = BuildMerchantContext();
+        if (merchant is not null)
+        {
+            return merchant.Kind == "inventory" ? "shop" : "merchant_room";
         }
 
         if (HasActivePostCombatProceed(runState))
@@ -241,6 +271,122 @@ internal static class BridgeIntrospection
         };
     }
 
+    public static RelicSelectionContextSnapshot? BuildRelicSelectionContext()
+    {
+        NChooseARelicSelection? screen = GetActiveRelicSelectionScreen();
+        if (screen is null)
+        {
+            return null;
+        }
+
+        List<RelicSnapshot> relics = BuildRelicSelectionRelics(screen);
+        if (relics.Count == 0)
+        {
+            return null;
+        }
+
+        return new RelicSelectionContextSnapshot
+        {
+            Kind = "choose_a_relic",
+            Prompt = "Choose a relic",
+            SkipAvailable = GetFieldValue(screen, "_skipButton") is Node skipButton && IsNodeVisible(skipButton),
+            Relics = relics,
+        };
+    }
+
+    public static RestSiteContextSnapshot? BuildRestSiteContext(RunState? runState)
+    {
+        NRestSiteRoom? roomNode = NRestSiteRoom.Instance;
+        if (roomNode is null || !IsNodeVisible(roomNode))
+        {
+            return null;
+        }
+
+        object? room = GetCurrentRoom(runState) ?? GetFieldValue(roomNode, "_room");
+        IEnumerable? options = GetMemberValue(room, "Options") as IEnumerable;
+        List<RestSiteOptionSnapshot> snapshots = [];
+        if (options is not null)
+        {
+            foreach (object? option in options)
+            {
+                if (option is not RestSiteOption restOption)
+                {
+                    continue;
+                }
+
+                snapshots.Add(new RestSiteOptionSnapshot
+                {
+                    Id = BuildRestSiteOptionId(restOption),
+                    Title = GetLocalizedText(restOption.Title),
+                    Description = GetRawLocalizedText(restOption.Description),
+                    Enabled = restOption.IsEnabled,
+                });
+            }
+        }
+
+        bool proceedAvailable = roomNode.ProceedButton is Node proceedButton && IsNodeVisible(proceedButton);
+        if (snapshots.Count == 0 && !proceedAvailable)
+        {
+            return null;
+        }
+
+        return new RestSiteContextSnapshot
+        {
+            Options = snapshots,
+            ProceedAvailable = proceedAvailable,
+        };
+    }
+
+    public static TreasureContextSnapshot? BuildTreasureContext()
+    {
+        NTreasureRoom? treasureRoom = GetActiveTreasureRoom();
+        if (treasureRoom is null)
+        {
+            return null;
+        }
+
+        bool chestOpenAvailable = GetFieldValue(treasureRoom, "_chestButton") is Node chestButton && IsNodeVisible(chestButton);
+        bool proceedAvailable = treasureRoom.ProceedButton is Node proceedButton && IsNodeVisible(proceedButton);
+        return new TreasureContextSnapshot
+        {
+            ChestOpenAvailable = chestOpenAvailable,
+            ProceedAvailable = proceedAvailable,
+            Relics = BuildTreasureRelics(treasureRoom),
+        };
+    }
+
+    public static List<PotionSnapshot> BuildPotionSnapshots(Player? player)
+    {
+        List<PotionSnapshot> potions = [];
+        if (player?.Potions is null)
+        {
+            return potions;
+        }
+
+        int index = 0;
+        foreach (object? potionLike in player.Potions)
+        {
+            if (potionLike is not PotionModel potion)
+            {
+                continue;
+            }
+
+            string title = GetLocalizedText(potion.Title);
+            potions.Add(new PotionSnapshot
+            {
+                Id = BuildPotionId(title, index),
+                Title = title,
+                Description = GetRawLocalizedText(potion.Description),
+                Rarity = potion.Rarity.ToString(),
+                Usage = potion.Usage.ToString(),
+                TargetType = potion.TargetType.ToString(),
+            });
+            index += 1;
+        }
+
+        return potions;
+    }
+
     public static RewardContextSnapshot? BuildRewardContext()
     {
         NRewardsScreen? rewardsScreen = GetActiveRewardsScreen();
@@ -276,6 +422,31 @@ internal static class BridgeIntrospection
         {
             ProceedEnabled = IsRewardProceedEnabled(rewardsScreen),
             Rewards = rewards,
+        };
+    }
+
+    public static MerchantContextSnapshot? BuildMerchantContext()
+    {
+        NMerchantRoom? merchantRoom = GetActiveMerchantRoom();
+        if (merchantRoom is null)
+        {
+            return null;
+        }
+
+        NMerchantInventory? inventory = merchantRoom.Inventory;
+        bool inventoryOpen = inventory is not null && inventory.IsOpen && IsNodeVisible(inventory);
+        bool enterShopAvailable = !inventoryOpen && merchantRoom.MerchantButton is Node merchantButton && IsNodeVisible(merchantButton);
+        bool leaveAvailable = inventoryOpen;
+        bool proceedAvailable = !inventoryOpen && merchantRoom.ProceedButton is Node proceedButton && IsNodeVisible(proceedButton);
+        List<MerchantItemSnapshot> items = inventoryOpen && inventory is not null ? BuildMerchantItems(inventory) : [];
+
+        return new MerchantContextSnapshot
+        {
+            Kind = inventoryOpen ? "inventory" : "room",
+            EnterShopAvailable = enterShopAvailable,
+            LeaveAvailable = leaveAvailable,
+            ProceedAvailable = proceedAvailable,
+            Items = items,
         };
     }
 
@@ -338,7 +509,7 @@ internal static class BridgeIntrospection
 
     public static ProceedContextSnapshot? BuildProceedContext(RunState? runState, int choiceCount, CardSelectionContextSnapshot? cardSelection)
     {
-        if (cardSelection is not null || choiceCount > 0 || BuildRewardContext() is not null || BuildMapContext(runState) is not null)
+        if (cardSelection is not null || BuildRelicSelectionContext() is not null || choiceCount > 0 || BuildRestSiteContext(runState) is not null || BuildTreasureContext() is not null || BuildMerchantContext() is not null || BuildRewardContext() is not null || BuildMapContext(runState) is not null)
         {
             return null;
         }
@@ -378,6 +549,33 @@ internal static class BridgeIntrospection
             }
         }
 
+        NMerchantRoom? merchantRoom = GetActiveMerchantRoom();
+        if (TryProceedMerchantRoom(merchantRoom, runState))
+        {
+            return true;
+        }
+
+        NRestSiteRoom? restSiteRoom = GetActiveRestSiteRoom();
+        if (restSiteRoom is not null && restSiteRoom.ProceedButton is Node restProceedButton && IsNodeVisible(restProceedButton))
+        {
+            MethodInfo? proceedMethod = restSiteRoom.GetType().GetMethod("OnProceedButtonReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (proceedMethod is not null)
+            {
+                proceedMethod.Invoke(restSiteRoom, new object?[] { null });
+                return true;
+            }
+        }
+
+        NTreasureRoom? treasureRoom = GetActiveTreasureRoom();
+        if (treasureRoom is not null && treasureRoom.ProceedButton is Node treasureProceedButton && IsNodeVisible(treasureProceedButton))
+        {
+            MethodInfo? proceedPressed = treasureRoom.GetType().GetMethod("OnProceedButtonPressed", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            MethodInfo? proceedReleased = treasureRoom.GetType().GetMethod("OnProceedButtonReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            proceedPressed?.Invoke(treasureRoom, new object?[] { null });
+            proceedReleased?.Invoke(treasureRoom, new object?[] { null });
+            return proceedPressed is not null || proceedReleased is not null;
+        }
+
         if (TryProceedPostCombat(runState))
         {
             return true;
@@ -389,6 +587,383 @@ internal static class BridgeIntrospection
             MethodInfo? proceedMethod = eventRoom.GetType().GetMethod("Proceed", BindingFlags.Public | BindingFlags.Static);
             proceedMethod?.Invoke(null, null);
             return proceedMethod is not null;
+        }
+
+        return false;
+    }
+
+    public static bool TryEnterMerchant()
+    {
+        NMerchantRoom? merchantRoom = GetActiveMerchantRoom();
+        if (merchantRoom is null)
+        {
+            return false;
+        }
+
+        if (merchantRoom.Inventory is not null && merchantRoom.Inventory.IsOpen)
+        {
+            return true;
+        }
+
+        MethodInfo? openInventory = merchantRoom.GetType().GetMethod("OpenInventory", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        if (openInventory is not null)
+        {
+            openInventory.Invoke(merchantRoom, null);
+            return true;
+        }
+
+        Node? merchantButton = merchantRoom.MerchantButton;
+        if (merchantButton is null || !IsNodeVisible(merchantButton))
+        {
+            return false;
+        }
+
+        MethodInfo? onRelease = merchantButton.GetType().GetMethod("OnRelease", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        if (onRelease is null)
+        {
+            return false;
+        }
+
+        onRelease.Invoke(merchantButton, null);
+        return true;
+    }
+
+    private static bool TryProceedMerchantRoom(NMerchantRoom? merchantRoom, RunState? runState)
+    {
+        if (merchantRoom is null)
+        {
+            return false;
+        }
+
+        if (merchantRoom.ProceedButton is Node merchantProceedButton && IsNodeVisible(merchantProceedButton))
+        {
+            MethodInfo? onPress = merchantProceedButton.GetType().GetMethod("OnPress", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+            MethodInfo? onRelease = merchantProceedButton.GetType().GetMethod("OnRelease", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+            onPress?.Invoke(merchantProceedButton, null);
+            if (onRelease is not null)
+            {
+                onRelease.Invoke(merchantProceedButton, null);
+                InvokeParameterlessMethod(merchantRoom, "OnActiveScreenUpdated");
+                TryInvokeHideScreen(merchantRoom);
+                return true;
+            }
+        }
+
+        foreach (string methodName in new[] { "OnProceedButtonPressed", "OnProceedPressed", "OnProceedButtonReleased", "Proceed" })
+        {
+            if (TryInvokeSemanticMerchantProceed(merchantRoom, methodName, merchantRoom.ProceedButton))
+            {
+                return true;
+            }
+        }
+
+        object? room = GetMemberValue(merchantRoom, "Room");
+        if (runState is not null && room is not null)
+        {
+            MethodInfo? exitMethod = room.GetType().GetMethod("Exit", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { runState.GetType() }, null);
+            if (exitMethod is not null)
+            {
+                exitMethod.Invoke(room, new object[] { runState });
+                return true;
+            }
+        }
+
+        if (TryInvokeHideScreen(merchantRoom))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryInvokeSemanticMerchantProceed(NMerchantRoom merchantRoom, string methodName, Node? proceedButton)
+    {
+        foreach (MethodInfo method in merchantRoom.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+        {
+            if (!string.Equals(method.Name, methodName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            ParameterInfo[] parameters = method.GetParameters();
+            if (parameters.Length == 0)
+            {
+                method.Invoke(merchantRoom, null);
+                return true;
+            }
+
+            if (parameters.Length == 1)
+            {
+                object? argument = null;
+                Type parameterType = parameters[0].ParameterType;
+                if (proceedButton is not null && parameterType.IsInstanceOfType(proceedButton))
+                {
+                    argument = proceedButton;
+                }
+
+                method.Invoke(merchantRoom, new[] { argument });
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryInvokeHideScreen(object source)
+    {
+        foreach (MethodInfo method in source.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+        {
+            if (!string.Equals(method.Name, "HideScreen", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            ParameterInfo[] parameters = method.GetParameters();
+            if (parameters.Length == 0)
+            {
+                method.Invoke(source, null);
+                return true;
+            }
+
+            if (parameters.Length == 1)
+            {
+                method.Invoke(source, new object?[] { null });
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static bool TryLeaveMerchant()
+    {
+        NMerchantInventory? inventory = GetActiveMerchantInventory();
+        if (inventory is null)
+        {
+            return false;
+        }
+
+        MethodInfo? close = inventory.GetType().GetMethod("Close", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        if (close is null)
+        {
+            return false;
+        }
+
+        close.Invoke(inventory, null);
+        return true;
+    }
+
+    public static bool TryPurchaseMerchantItem(string itemId)
+    {
+        NMerchantInventory? inventory = GetActiveMerchantInventory();
+        if (inventory is null)
+        {
+            return false;
+        }
+
+        if (!TryGetMerchantSlot(inventory, itemId, out NMerchantSlot? slot) || slot is null)
+        {
+            return false;
+        }
+
+        object? entry = slot.Entry;
+        if (entry is null || !GetMerchantItemAffordable(entry) || !GetMerchantItemStocked(entry))
+        {
+            return false;
+        }
+
+        MethodInfo? onRelease = slot.GetType().GetMethod("OnReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        if (onRelease is not null)
+        {
+            onRelease.Invoke(slot, null);
+            return true;
+        }
+
+        MethodInfo? onTryPurchase = slot.GetType().GetMethod("OnTryPurchase", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(MerchantInventory) }, null);
+        if (onTryPurchase is not null)
+        {
+            MerchantInventory? merchantInventory = inventory.Inventory;
+            if (merchantInventory is null)
+            {
+                return false;
+            }
+
+            onTryPurchase.Invoke(slot, new object[] { merchantInventory });
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool TrySelectRestSiteOption(RunState? runState, string optionId)
+    {
+        NRestSiteRoom? roomNode = NRestSiteRoom.Instance;
+        if (roomNode is null || !IsNodeVisible(roomNode))
+        {
+            return false;
+        }
+
+        object? room = GetCurrentRoom(runState) ?? GetFieldValue(roomNode, "_room");
+        IEnumerable? options = GetMemberValue(room, "Options") as IEnumerable;
+        if (options is null)
+        {
+            return false;
+        }
+
+        foreach (object? option in options)
+        {
+            if (option is not RestSiteOption restOption || !string.Equals(BuildRestSiteOptionId(restOption), optionId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!restOption.IsEnabled)
+            {
+                return false;
+            }
+
+            object? button = null;
+            foreach (MethodInfo getButton in roomNode.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!string.Equals(getButton.Name, "GetButtonForOption", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                ParameterInfo[] parameters = getButton.GetParameters();
+                try
+                {
+                    if (parameters.Length == 1)
+                    {
+                        button = getButton.Invoke(roomNode, new object[] { restOption });
+                        break;
+                    }
+
+                    if (parameters.Length == 2)
+                    {
+                        button = getButton.Invoke(roomNode, new object?[] { null, restOption });
+                        break;
+                    }
+                }
+                catch
+                {
+                }
+            }
+            if (button is not null)
+            {
+                MethodInfo? onPress = button.GetType().GetMethod("OnPress", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                MethodInfo? onRelease = button.GetType().GetMethod("OnRelease", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                onPress?.Invoke(button, null);
+                onRelease?.Invoke(button, null);
+                return onRelease is not null || onPress is not null;
+            }
+
+            restOption.OnSelect();
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool TryOpenTreasureChest()
+    {
+        NTreasureRoom? room = GetActiveTreasureRoom();
+        if (room is null)
+        {
+            return false;
+        }
+
+        MethodInfo? openChest = room.GetType().GetMethod("OpenChest", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        if (openChest is not null)
+        {
+            openChest.Invoke(room, null);
+            return true;
+        }
+
+        MethodInfo? onChestButtonReleased = room.GetType().GetMethod("OnChestButtonReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (onChestButtonReleased is not null)
+        {
+            onChestButtonReleased.Invoke(room, new object?[] { null });
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool TrySelectTreasureRelic(string relicId)
+    {
+        NTreasureRoom? room = GetActiveTreasureRoom();
+        if (room is null)
+        {
+            return false;
+        }
+
+        if (!TryFindTreasureRelicHolder(room, relicId, out NTreasureRoomRelicHolder? holder) || holder is null)
+        {
+            return false;
+        }
+
+        MethodInfo? onPress = holder.GetType().GetMethod("OnPress", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        MethodInfo? onRelease = holder.GetType().GetMethod("OnRelease", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        onPress?.Invoke(holder, null);
+        onRelease?.Invoke(holder, null);
+        return onRelease is not null || onPress is not null;
+    }
+
+    public static bool TrySelectRelic(string relicId)
+    {
+        NChooseARelicSelection? screen = GetActiveRelicSelectionScreen();
+        if (screen is not null && TryFindRelicHolder(screen, relicId, out Node? holder) && holder is not null)
+        {
+            MethodInfo? selectHolder = FindSingleParameterMethod(screen.GetType(), "SelectHolder");
+            if (selectHolder is not null)
+            {
+                selectHolder.Invoke(screen, new object[] { holder });
+                return true;
+            }
+        }
+
+        return TrySelectTreasureRelic(relicId);
+    }
+
+    public static bool TryUsePotion(Player? player, CombatState? combatState, string potionId, string? targetId)
+    {
+        if (player?.Potions is null)
+        {
+            return false;
+        }
+
+        int index = 0;
+        foreach (object? potionLike in player.Potions)
+        {
+            if (potionLike is not PotionModel potion)
+            {
+                continue;
+            }
+
+            string title = GetLocalizedText(potion.Title);
+            if (!string.Equals(BuildPotionId(title, index), potionId, StringComparison.Ordinal))
+            {
+                index += 1;
+                continue;
+            }
+
+            object? target = ResolveCommandTarget(targetId, combatState, player);
+            try
+            {
+                MethodInfo? enqueueManualUse = potion.GetType().GetMethod("EnqueueManualUse", BindingFlags.Instance | BindingFlags.Public);
+                if (enqueueManualUse is null)
+                {
+                    return false;
+                }
+
+                enqueueManualUse.Invoke(potion, new[] { target });
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         return false;
@@ -923,6 +1498,486 @@ internal static class BridgeIntrospection
         }
 
         return activeScreen;
+    }
+
+    private static NMerchantRoom? GetActiveMerchantRoom()
+    {
+        NMerchantRoom? merchantRoom = NMerchantRoom.Instance;
+        if (merchantRoom is null || !IsNodeVisible(merchantRoom))
+        {
+            return null;
+        }
+
+        return merchantRoom;
+    }
+
+    private static NMerchantInventory? GetActiveMerchantInventory()
+    {
+        NMerchantRoom? merchantRoom = GetActiveMerchantRoom();
+        NMerchantInventory? inventory = merchantRoom?.Inventory;
+        if (inventory is null || !inventory.IsOpen || !IsNodeVisible(inventory))
+        {
+            return null;
+        }
+
+        return inventory;
+    }
+
+    private static NRestSiteRoom? GetActiveRestSiteRoom()
+    {
+        NRestSiteRoom? room = NRestSiteRoom.Instance;
+        return room is not null && IsNodeVisible(room) ? room : null;
+    }
+
+    private static NTreasureRoom? GetActiveTreasureRoom()
+    {
+        if (Engine.GetMainLoop() is not SceneTree tree)
+        {
+            return null;
+        }
+
+        NTreasureRoom? active = null;
+        foreach (Node node in EnumerateNodes(tree.Root))
+        {
+            if (node is NTreasureRoom treasureRoom && IsNodeVisible(treasureRoom))
+            {
+                active = treasureRoom;
+            }
+        }
+
+        return active;
+    }
+
+    private static NChooseARelicSelection? GetActiveRelicSelectionScreen()
+    {
+        if (Engine.GetMainLoop() is not SceneTree tree)
+        {
+            return null;
+        }
+
+        NChooseARelicSelection? active = null;
+        foreach (Node node in EnumerateNodes(tree.Root))
+        {
+            if (node is NChooseARelicSelection relicSelection && IsNodeVisible(relicSelection))
+            {
+                active = relicSelection;
+            }
+        }
+
+        return active;
+    }
+
+    private static List<RelicSnapshot> BuildRelicSelectionRelics(NChooseARelicSelection screen)
+    {
+        List<RelicSnapshot> relics = [];
+        Type? holderType = FindSingleParameterMethod(screen.GetType(), "SelectHolder")?.GetParameters()[0].ParameterType;
+        int index = 0;
+        foreach (Node node in EnumerateNodes(screen))
+        {
+            if (holderType is not null && !holderType.IsInstanceOfType(node))
+            {
+                continue;
+            }
+
+            object? relicLike = GetMemberValue(node, "Relic");
+            if (relicLike is not RelicModel relic)
+            {
+                continue;
+            }
+
+            relics.Add(BuildRelicSnapshot(relic, index));
+            index += 1;
+        }
+
+        return relics;
+    }
+
+    private static List<RelicSnapshot> BuildTreasureRelics(NTreasureRoom room)
+    {
+        List<RelicSnapshot> relics = [];
+        object? collection = GetFieldValue(room, "_relicCollection");
+        if (collection is not Node collectionNode || !IsNodeVisible(collectionNode))
+        {
+            return relics;
+        }
+
+        int index = 0;
+        foreach (Node node in EnumerateNodes(collectionNode))
+        {
+            if (node is not NTreasureRoomRelicHolder holder || holder.Relic is null)
+            {
+                continue;
+            }
+
+            relics.Add(BuildRelicSnapshot(holder.Relic, index));
+            index += 1;
+        }
+
+        return relics;
+    }
+
+    private static RelicSnapshot BuildRelicSnapshot(object relicLike, int index)
+    {
+        object? model = GetMemberValue(relicLike, "Model") ?? relicLike;
+        string title = GetLocalizedPropertyValue(model, "Title");
+        if (string.IsNullOrEmpty(title))
+        {
+            title = GetPropertyTextOrEmpty(model, "Name");
+        }
+
+        return new RelicSnapshot
+        {
+            Id = BuildRelicId(title, index),
+            Title = title,
+            Description = GetRawLocalizedPropertyValue(model, "Description"),
+            Rarity = GetPropertyTextOrEmpty(model, "Rarity"),
+        };
+    }
+
+    private static bool TryFindRelicHolder(NChooseARelicSelection screen, string relicId, out Node? holder)
+    {
+        holder = null;
+        Type? holderType = FindSingleParameterMethod(screen.GetType(), "SelectHolder")?.GetParameters()[0].ParameterType;
+        int index = 0;
+        foreach (Node node in EnumerateNodes(screen))
+        {
+            if (holderType is not null && !holderType.IsInstanceOfType(node))
+            {
+                continue;
+            }
+
+            object? relicLike = GetMemberValue(node, "Relic");
+            if (relicLike is null)
+            {
+                continue;
+            }
+
+            if (string.Equals(BuildRelicSnapshot(relicLike, index).Id, relicId, StringComparison.Ordinal))
+            {
+                holder = node;
+                return true;
+            }
+
+            index += 1;
+        }
+
+        return false;
+    }
+
+    private static bool TryFindTreasureRelicHolder(NTreasureRoom room, string relicId, out NTreasureRoomRelicHolder? holder)
+    {
+        holder = null;
+        object? collection = GetFieldValue(room, "_relicCollection");
+        if (collection is not Node collectionNode)
+        {
+            return false;
+        }
+
+        int index = 0;
+        foreach (Node node in EnumerateNodes(collectionNode))
+        {
+            if (node is not NTreasureRoomRelicHolder relicHolder || relicHolder.Relic is null)
+            {
+                continue;
+            }
+
+            if (string.Equals(BuildRelicSnapshot(relicHolder.Relic, index).Id, relicId, StringComparison.Ordinal))
+            {
+                holder = relicHolder;
+                return true;
+            }
+
+            index += 1;
+        }
+
+        return false;
+    }
+
+    private static List<MerchantItemSnapshot> BuildMerchantItems(NMerchantInventory inventory)
+    {
+        List<MerchantItemSnapshot> items = [];
+        int index = 0;
+        foreach (NMerchantSlot slot in GetMerchantSlots(inventory))
+        {
+            object? entry = slot.Entry;
+            if (entry is null)
+            {
+                index += 1;
+                continue;
+            }
+
+            string kind = GetMerchantItemKind(slot, entry);
+            string title = GetMerchantItemTitle(slot, entry, kind);
+            string description = GetMerchantItemDescription(slot, entry, kind);
+            int cost = GetMerchantItemCost(entry);
+            bool affordable = GetMerchantItemAffordable(entry);
+            bool stocked = GetMerchantItemStocked(entry);
+
+            items.Add(new MerchantItemSnapshot
+            {
+                Id = BuildMerchantItemId(kind, title, cost, index),
+                Kind = kind,
+                Title = title,
+                Description = description,
+                Cost = cost,
+                Affordable = affordable,
+                Purchasable = affordable && stocked,
+                Rarity = GetMerchantItemRarity(entry, kind),
+                OnSale = GetMerchantItemOnSale(entry),
+            });
+            index += 1;
+        }
+
+        return items;
+    }
+
+    private static IEnumerable<NMerchantSlot> GetMerchantSlots(NMerchantInventory inventory)
+    {
+        MethodInfo? getAllSlots = inventory.GetType().GetMethod("GetAllSlots", BindingFlags.Instance | BindingFlags.Public);
+        if (getAllSlots?.Invoke(inventory, null) is IEnumerable slotEnumerable)
+        {
+            foreach (object? slotLike in slotEnumerable)
+            {
+                if (slotLike is NMerchantSlot slot)
+                {
+                    yield return slot;
+                }
+            }
+        }
+    }
+
+    private static bool TryGetMerchantSlot(NMerchantInventory inventory, string itemId, out NMerchantSlot? matchedSlot)
+    {
+        matchedSlot = null;
+        int index = 0;
+        foreach (NMerchantSlot slot in GetMerchantSlots(inventory))
+        {
+            object? entry = slot.Entry;
+            if (entry is null)
+            {
+                index += 1;
+                continue;
+            }
+
+            string kind = GetMerchantItemKind(slot, entry);
+            string title = GetMerchantItemTitle(slot, entry, kind);
+            int cost = GetMerchantItemCost(entry);
+            if (string.Equals(BuildMerchantItemId(kind, title, cost, index), itemId, StringComparison.Ordinal))
+            {
+                matchedSlot = slot;
+                return true;
+            }
+
+            index += 1;
+        }
+
+        return false;
+    }
+
+    private static string BuildMerchantItemId(string kind, string title, int cost, int index)
+    {
+        uint hash = 2166136261;
+        foreach (char character in $"{kind}|{title}|{cost.ToString(CultureInfo.InvariantCulture)}|{index.ToString(CultureInfo.InvariantCulture)}")
+        {
+            hash ^= character;
+            hash *= 16777619;
+        }
+
+        return $"shop_{kind}_{index.ToString(CultureInfo.InvariantCulture)}_{hash.ToString(CultureInfo.InvariantCulture)}";
+    }
+
+    private static string BuildPotionId(string title, int index)
+    {
+        return BuildStableId("potion", title, index);
+    }
+
+    private static string BuildRelicId(string title, int index)
+    {
+        return BuildStableId("relic", title, index);
+    }
+
+    private static string BuildRestSiteOptionId(RestSiteOption option)
+    {
+        string title = GetLocalizedText(option.Title);
+        string optionId = option.OptionId.ToString();
+        return BuildStableId("rest", $"{optionId}|{title}", 0);
+    }
+
+    private static string BuildStableId(string prefix, string key, int index)
+    {
+        uint hash = 2166136261;
+        foreach (char character in $"{key}|{index.ToString(CultureInfo.InvariantCulture)}")
+        {
+            hash ^= character;
+            hash *= 16777619;
+        }
+
+        return $"{prefix}_{index.ToString(CultureInfo.InvariantCulture)}_{hash.ToString(CultureInfo.InvariantCulture)}";
+    }
+
+    private static string GetMerchantItemKind(NMerchantSlot slot, object entry)
+    {
+        object? visual = GetMemberValue(slot, "Visual");
+        string slotTypeName = visual?.GetType().Name ?? slot.GetType().Name;
+        if (slotTypeName.Contains("CardRemoval", StringComparison.Ordinal))
+        {
+            return "remove_card";
+        }
+
+        if (slotTypeName.Contains("Relic", StringComparison.Ordinal))
+        {
+            return "relic";
+        }
+
+        if (slotTypeName.Contains("Potion", StringComparison.Ordinal))
+        {
+            return "potion";
+        }
+
+        if (slotTypeName.Contains("Card", StringComparison.Ordinal))
+        {
+            return "card";
+        }
+
+        string entryTypeName = entry.GetType().Name;
+        if (entryTypeName.Contains("CardRemoval", StringComparison.Ordinal))
+        {
+            return "remove_card";
+        }
+
+        if (entryTypeName.Contains("Relic", StringComparison.Ordinal))
+        {
+            return "relic";
+        }
+
+        if (entryTypeName.Contains("Potion", StringComparison.Ordinal))
+        {
+            return "potion";
+        }
+
+        return "card";
+    }
+
+    private static string GetMerchantItemTitle(NMerchantSlot slot, object entry, string kind)
+    {
+        object? visual = GetMemberValue(slot, "Visual");
+        if (kind == "remove_card")
+        {
+            string text = GetLocalizedPropertyValue(visual, "Title");
+            if (!string.IsNullOrEmpty(text))
+            {
+                return text;
+            }
+
+            return "Remove a card";
+        }
+
+        if (kind == "card")
+        {
+            object? creationResult = GetMemberValue(entry, "CreationResult");
+            object? card = GetMemberValue(creationResult, "Card");
+            if (card is not null)
+            {
+                return GetCardName(card);
+            }
+        }
+
+        foreach (string memberName in new[] { "Model", "Potion", "Relic" })
+        {
+            object? model = GetMemberValue(entry, memberName);
+            string text = GetLocalizedPropertyValue(model, "Title");
+            if (!string.IsNullOrEmpty(text))
+            {
+                return text;
+            }
+
+            text = GetPropertyTextOrEmpty(model, "Name");
+            if (!string.IsNullOrEmpty(text))
+            {
+                return text;
+            }
+        }
+
+        return kind;
+    }
+
+    private static string GetMerchantItemDescription(NMerchantSlot slot, object entry, string kind)
+    {
+        object? visual = GetMemberValue(slot, "Visual");
+        if (kind == "remove_card")
+        {
+            string text = GetRawLocalizedPropertyValue(visual, "Description");
+            if (!string.IsNullOrEmpty(text))
+            {
+                return text;
+            }
+
+            return "Remove a card from your deck.";
+        }
+
+        if (kind == "card")
+        {
+            object? creationResult = GetMemberValue(entry, "CreationResult");
+            object? card = GetMemberValue(creationResult, "Card");
+            if (card is not null)
+            {
+                return GetCardDescription(card);
+            }
+        }
+
+        foreach (string memberName in new[] { "Model", "Potion", "Relic" })
+        {
+            object? model = GetMemberValue(entry, memberName);
+            string text = GetRawLocalizedPropertyValue(model, "Description");
+            if (!string.IsNullOrEmpty(text))
+            {
+                return text;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static int GetMerchantItemCost(object entry)
+    {
+        object? cost = GetMemberValue(entry, "Cost");
+        return cost is int intCost ? intCost : 0;
+    }
+
+    private static bool GetMerchantItemAffordable(object entry)
+    {
+        object? enoughGold = GetMemberValue(entry, "EnoughGold");
+        return enoughGold is bool boolValue && boolValue;
+    }
+
+    private static bool GetMerchantItemStocked(object entry)
+    {
+        object? isStocked = GetMemberValue(entry, "IsStocked");
+        return isStocked is bool boolValue && boolValue;
+    }
+
+    private static string? GetMerchantItemRarity(object entry, string kind)
+    {
+        if (kind == "card")
+        {
+            object? creationResult = GetMemberValue(entry, "CreationResult");
+            object? card = GetMemberValue(creationResult, "Card");
+            if (card is not null)
+            {
+                string rarity = GetCardRarity(card);
+                return string.IsNullOrEmpty(rarity) ? null : rarity;
+            }
+        }
+
+        object? model = GetMemberValue(entry, "Model");
+        string modelRarity = GetPropertyTextOrEmpty(model, "Rarity");
+        return string.IsNullOrEmpty(modelRarity) ? null : modelRarity;
+    }
+
+    private static bool? GetMerchantItemOnSale(object entry)
+    {
+        object? onSale = GetMemberValue(entry, "IsOnSale");
+        return onSale is bool boolValue ? boolValue : null;
     }
 
     private static bool HasActivePostCombatProceed(RunState? runState)
@@ -1504,6 +2559,17 @@ internal static class BridgeIntrospection
 
         object? value = source.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(source);
         return GetLocalizedText(value);
+    }
+
+    private static string GetRawLocalizedPropertyValue(object? source, string propertyName)
+    {
+        if (source is null)
+        {
+            return string.Empty;
+        }
+
+        object? value = source.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(source);
+        return GetRawLocalizedText(value);
     }
 
     private static int GetIntPropertyValue(object? source, string propertyName)

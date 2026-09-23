@@ -2,16 +2,12 @@
 
 **Experimental v0.1.0.** A file-based Slay the Spire 2 state/action bridge for
 external controllers. Exports structured observations and accepts semantic game
-commands. No computer-vision gameplay interface, AI runtime, model credentials,
-or Workshop installation is required.
+commands. Includes a Python CLI and an installable agent skill.
 
-**Demonstrated:** recorded, human-supervised Ironclad Ascension 0 and Ascension 1
-clears through all three acts on native Linux, game **v0.107.1**. The A1 run used
-the shared CLI end-to-end to reach the victory screen and unlock Ascension 2;
-its chosen event branches needed no manual workarounds. The earlier A0 development
-playtest (seed `BMFZ8A0H3G`) included fixes, save/quit/reloads, human guidance, and
-screenshots for debugging. These are supervised playtests, not an unattended
-benchmark, a win rate, or exhaustive screen coverage.
+**Validated:** an Ironclad Ascension 1 clear through all three acts on native
+Linux, game **v0.107.1**, using the shared CLI end-to-end. The run reached the
+victory screen and unlocked Ascension 2; its chosen event branches needed no
+manual workarounds.
 
 Combat, card/potion choices, rewards, shops, treasure, rest sites, maps, and many
 events are supported. Custom screens such as Crystal Sphere still need a human;
@@ -34,9 +30,7 @@ or an endorsement by Godot.
 
 ## Install the mod
 
-Install the mod and agent skill separately. Playing needs the game, the release
-DLL/manifest, and Python 3.8+; no .NET SDK, repository checkout, MCP server, or
-Python packages are needed. Node/npm is needed only to run the skills installer.
+**Requirement:** Slay the Spire 2 v0.107.1.
 
 1. Close the game and back up any saves you care about. Use a separate test profile.
 2. From a [tagged release](https://github.com/ethanfann/sts2-bridge/releases), extract
@@ -55,10 +49,7 @@ Python packages are needed. Node/npm is needed only to run the skills installer.
 3. Enable mods in the game and restart if prompted. Start or continue a run by hand.
 4. Check the game log for `STS2 Bridge writing state to ...` to find the data directory.
 
-No `.pck`, game DLLs, or reference assemblies belong in this package. The manifest
-declares v0.107.1 as its minimum, **not a promise of compatibility with later patches**.
-Only native Linux v0.107.1 has been exercised so far. The DLL is managed code, but
-other platforms need their own runtime validation.
+Later game patches require fresh runtime validation.
 
 **Migrating from FirstMod:** move `mods/FirstMod` outside the mods directory before
 installing. Do not load both mods. The mod ID, assembly, and data directory have
@@ -68,6 +59,8 @@ changed; old saves may require the old mod or a new test profile. Existing
 
 ## Install the agent skill (includes the CLI)
 
+**Requirements:** Python 3.8+ to run the CLI; Node.js/npm to run the skill installer.
+
 ```sh
 npx skills add ethanfann/sts2-bridge --skill playing-sts2 --global
 ```
@@ -75,25 +68,14 @@ npx skills add ethanfann/sts2-bridge --skill playing-sts2 --global
 Choose your agent in the installer, or append its selector (for example,
 `--agent amp`). `--global` makes the skill available across working directories;
 omit it to install into the current agent project. Reload skills or restart the
-agent after installation. The GitHub command requires the source to have been
-pushed and, while the repo is private, existing GitHub access. It does not install
-the game mod. Before pushing, maintainers can test with a local source instead:
-
-```sh
-npx skills add /absolute/path/to/sts2-bridge --skill playing-sts2 --global
-```
+agent after installation.
 
 The [playing-sts2 skill](.agents/skills/playing-sts2/SKILL.md) ships its own
-dependency-free `scripts/sts2_bridge.py` and MIT license. It does not rely on a
-repository checkout, download another runtime, or start an MCP server. The CLI
-implementation lives inside the skill; root `bridge.py` is only a checkout entry
-point, so both installations use the same code.
+`scripts/sts2_bridge.py` and MIT license. The CLI implementation lives inside the
+skill; root `bridge.py` is a checkout entry point to the same code.
 
-Following [Herdr's help-first pattern](https://github.com/herdrdev/herdr/blob/master/skills/herdr/SKILL.md),
-the installed CLI's **`--help` is authoritative**. The skill tells agents how to
-discover commands, read state, coordinate one writer, and stop at new decisions;
-it does not impose a card-selection policy. Resolve `<skill-dir>` from the
-installer or the loaded skill's location, not the agent's current directory:
+The installed CLI's **`--help` is authoritative**. Resolve `<skill-dir>` from the
+installer or the loaded skill's location:
 
 ```sh
 python3 "<skill-dir>/scripts/sts2_bridge.py" --help

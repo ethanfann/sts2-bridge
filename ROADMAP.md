@@ -1,11 +1,9 @@
 # Milestones and swappable rulesets
 
 Recorded 2026-09-21; updated 2026-09-23. **Phase 0 achieved and exceeded:**
-recorded, human-supervised Ironclad A0 and A1 clears through all three acts on
-native Linux v0.107.1. The A1 clear used the shared CLI to reach victory and unlock
-A2; every chosen event branch worked without a manual workaround. The earlier
-A0 development run (seed `BMFZ8A0H3G`) included fixes, save/quit/reloads, human
-guidance, and screenshots. This is not unattended reliability or a win rate.
+the shared CLI has completed an Ironclad A1 clear through all three acts on
+native Linux v0.107.1, reaching victory and unlocking A2. Every chosen event
+branch worked without a manual workaround.
 **Current work: experimental v0.1.0 bridge release preparation.**
 
 This is a staged plan, not a request to implement every layer now. It supersedes

@@ -14,28 +14,16 @@ events are supported. Custom screens such as Crystal Sphere still need a human;
 menus, victory/loss results, epochs, and run start/resume remain human-assisted
 by design. Multiplayer and native Windows/macOS gameplay are unverified.
 The protocol and game hooks may change.
-The [roadmap](ROADMAP.md) separates completed bridge work from future decision
-policies, Jev, retrieval, and simulation.
-
-Bridge code is [MIT licensed](LICENSE). Game content and third-party dependencies
-remain under their owners' terms; the MIT license does not grant rights to them.
-
-The repository's inherited `icon.svg` and `mod_image.png` are default Godot project
-icons using the Godot Engine logo, copyright © 2017 Andrea Calabró, licensed under
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
-([upstream notice](https://github.com/godotengine/godot/blob/master/misc/logo/LICENSE.txt)).
-They retain the default project-icon styling; `mod_image.png` is a raster version.
-Neither image is included in the DLL-only release. They are not STS2 Bridge branding
-or an endorsement by Godot.
 
 ## Install the mod
 
-**Requirement:** Slay the Spire 2 v0.107.1.
+**Requirement:** Slay the Spire 2 installed.
 
-1. Close the game and back up any saves you care about. Use a separate test profile.
-2. From a [tagged release](https://github.com/ethanfann/sts2-bridge/releases), extract
-   `sts2-bridge-v0.1.0.zip` into the game's `mods` directory. Steam's **Manage → Browse
-   local files** opens the game install directory. Create `mods` if absent:
+1. Download the ZIP from the [latest bridge release](https://github.com/ethanfann/sts2-bridge/releases).
+   Check its required game version and update Slay the Spire 2 through Steam if needed.
+2. Close the game and back up any saves you care about. Use a separate test profile.
+3. In Steam, select **Manage → Browse local files** to open the game directory.
+   Extract the ZIP into `mods`, creating that directory if needed:
 
    ```text
    Slay the Spire 2/mods/sts2-bridge/
@@ -44,18 +32,8 @@ or an endorsement by Godot.
      LICENSE
    ```
 
-   Or download the DLL and JSON separately and place them in that same folder.
-   **The JSON manifest is required; a DLL by itself is not the full installation.**
-3. Enable mods in the game and restart if prompted. Start or continue a run by hand.
-4. Check the game log for `STS2 Bridge writing state to ...` to find the data directory.
-
-Later game patches require fresh runtime validation.
-
-**Migrating from FirstMod:** move `mods/FirstMod` outside the mods directory before
-installing. Do not load both mods. The mod ID, assembly, and data directory have
-changed; old saves may require the old mod or a new test profile. Existing
-`first-mod-bridge` recordings are preserved, not migrated. Point `recording.py
---bridge-dir` at the old directory to inspect them.
+4. Enable mods in the game and restart if prompted. Start or continue a run by hand.
+5. Check the game log for `STS2 Bridge writing state to ...` to find the data directory.
 
 ## Install the agent skill (includes the CLI)
 
@@ -91,15 +69,13 @@ example, `act end_turn`). Use help rather than probing commands.
 
 ## Working directories and live bridge files
 
-These are separate locations; the agent does **not** need to work inside Steam:
-
 | Directory | Contents and purpose |
 | --- | --- |
 | `<game>/mods/sts2-bridge/` | Installed DLL and JSON manifest; loaded at game startup. |
 | `<skill-dir>/` | `SKILL.md`, `LICENSE`, and `scripts/sts2_bridge.py`. For Amp, a project install normally lives at `.agents/skills/playing-sts2/`, a global install at `~/.config/agents/skills/playing-sts2/`. Other agents may differ. |
 | Agent working directory | Any chosen project/workspace. Use an absolute CLI path; changing this directory does not switch games or relocate runtime data. |
 | `<bridge-data>/` | State, command transport, and recordings shared with the running game. Not the mods directory, repository, or save-profile directory. |
-| Source checkout (developers only) | `bridge.py`, build scripts, tests, and `dist/` outputs. A checkout may still be named `first-mod`; runtime paths do not depend on its name. |
+| Source checkout | `bridge.py`, build scripts, tests, and `dist/` outputs. |
 
 The mod writes to Godot's `user://sts2-bridge`. On native Linux this is normally
 `~/.local/share/SlayTheSpire2/sts2-bridge`; if `XDG_DATA_HOME` is configured for the
@@ -137,7 +113,7 @@ writer active, and keep saves/recordings out of source control.
 
 The examples below use `python3 bridge.py` from a source checkout. With an installed
 skill, replace `bridge.py` with the absolute path to `scripts/sts2_bridge.py` above.
-Run `--help` first; the same client drives the sandbox tests and installed skill.
+Run `--help` first for command syntax.
 
 ```sh
 python3 bridge.py observe                        # Current decision; no full deck/piles/history
@@ -182,11 +158,10 @@ wait separately (10 seconds each by default). Do not resubmit a whole partial
 sequence. This is an execution aid, not a tactical simulator or transaction.
 
 `act --if-state '<id>' play_card ...` enables the same optional guard for a single
-action. Without it, `act` retains the original command behavior. Single-action
+action. Without it, `act` submits an unguarded command. Single-action
 output distinguishes `state_changed` from `effects_settled: null`; a fresh
 observation alone is not proof of completion. Python callers can import
-`read_state`, `act`, and `play_sequence` from `bridge.py` in a checkout. MCP is
-deferred; the CLI and skill are the supported agent interface for now.
+`read_state`, `act`, and `play_sequence` from `bridge.py` in a checkout.
 
 ### File protocol and execution guards
 
@@ -213,14 +188,13 @@ the game log on other platforms. The game owns `state.json` and
    A timeout is ambiguous; do not blindly retry. There is no durable exactly-once
    guarantee across reloads.
 
-New DLLs advertise `command_guards: ["expected_state_id"]`. When supplied, that
+The mod advertises `command_guards: ["expected_state_id"]`. When supplied, that
 field must match the published observation and its gameplay context must still
 match the live game on the main thread immediately before execution. Guarded
 commands from an earlier game process are rejected. Combat diagnostic labels
 (including floating damage text) can update without changing `state_id`; other
 gameplay-context changes invalidate it. This checks **observable** state, not
-hidden RNG or a complete engine snapshot. Sequences refuse older DLLs without the
-guard capability; ordinary unguarded commands remain compatible.
+hidden RNG or a complete engine snapshot. Sequences require the guard capability.
 
 The Python client atomically publishes complete commands without overwriting a
 pending one and holds `client.lock` through result consumption. All writers must
@@ -256,207 +230,9 @@ can issue game commands. There is no network listener or authentication layer.
 Do not synchronize the live command directory with an untrusted source. Recordings
 are local and persistent; review them for paths, seeds, and notes before sharing.
 
-## Native Linux build
-
-Install a .NET 9 **SDK** (the runtime alone cannot compile the mod). With mise:
-
-```sh
-mise install dotnet@9
-mise exec dotnet@9 -- ./build-and-deploy.sh build
-```
-
-If the SDK is already on `PATH`, run `./build-and-deploy.sh build` directly.
-The default action is also `build`; it never installs or starts the game.
-
-The script reads `sts2.dll` and `0Harmony.dll` directly from the installed game's
-`data_sts2_linuxbsd_x86_64` directory. Old repository-root DLLs are not used on
-Linux. The Godot SDK supplies the C# bindings and source generator; no Godot
-editor or PCK export is needed. The package contains only `sts2-bridge.dll` and
-`sts2-bridge.json` in `dist/local/`.
-
-The default game directory is
-`~/.local/share/Steam/steamapps/common/Slay the Spire 2`. For another library,
-append `--game-dir "/path/to/Slay the Spire 2"` to any command. Direct MSBuild
-users can pass `-p:GameDataDir="/path/to/data_sts2_linuxbsd_x86_64"`.
-
-## Windows build
-
-With a .NET 9 SDK and the game installed, in PowerShell:
-
-```powershell
-.\build-and-deploy.ps1 build
-.\build-and-deploy.ps1 install  # Game must be closed
-# For a different Steam library, add -GameDir 'D:\SteamLibrary\steamapps\common\Slay the Spire 2'
-```
-
-The `.cmd` wrapper forwards the same arguments. Build and install are separate;
-no Godot editor, PCK export, automatic game launch, or repository-root game DLL
-copies are needed. This script has not yet been exercised on native Windows.
-
-## Release builds and GitHub Actions
-
-Both local compilation/upload and hosted CI are possible. Alchyr's
-[mod template](https://github.com/Alchyr/ModTemplate-StS2) builds against an installed
-game; [BaseLib](https://github.com/Alchyr/BaseLib-StS2/releases) distributes mod
-assets on GitHub. This project's CI instead compiles against pinned
-[Book.StS2.RefLib 0.107.1](https://www.nuget.org/packages/Book.StS2.RefLib/0.107.1).
-Its publisher states Mega Crit permits reference use. It contains signature-only
-`sts2`, Harmony, and Godot assemblies; only compile assets are enabled, not runtime
-assets or its access-check-generating build targets. No Steam login is needed.
-
-Run the same packaging step locally with Python 3 and a .NET 9 SDK on `PATH`:
-
-```sh
-python3 release.py --tag v0.1.0
-# Or: mise exec dotnet@9 -- python3 release.py --tag v0.1.0
-```
-
-This validates that the supplied tag, project version, and manifest version agree,
-rebuilds against the references, and creates `dist/release/` with the DLL, manifest,
-versioned ZIP, MIT `LICENSE`, and `SHA256SUMS`. It neither creates a tag nor installs/uploads files.
-The ZIP contains `sts2-bridge/sts2-bridge.dll`, its JSON manifest, and the license.
-Never upload the whole build tree: it can contain dependencies and test fixtures.
-
-The workflow runs unit/packaging tests and builds artifacts on pushes and PRs.
-A pushed `v*` tag additionally creates a **draft prerelease**, for a maintainer to
-review and publish. PR builds have no release-write permissions. There are no
-self-hosted runners, game downloads, Workshop uploads, or custom secrets.
-Reference compilation currently emits a Godot-generated `Main` name-conflict
-warning (CS0436); do not confuse a successful build with game compatibility.
-
-Before publishing source/history, review it for private data and third-party
-content. The inherited Godot icons are attributed above; the bridge's selected
-source license is MIT. Preserve its notice with binary distributions too.
-For each release, update versions, run installed-game fixtures, test the actual
-packaged DLL using `tests/smoke.py --package-dir dist/release`, then commit/tag the
-reviewed revision. Review the draft and its compatibility notes before publishing.
-CI cannot run the game from reference stubs. A game update needs fresh runtime
-tests even when compilation still passes.
-
-## Repeatable smoke test
-
-Requires Python 3 and bubblewrap (`bwrap`), in addition to the installed game:
-
-```sh
-./build-and-deploy.sh smoke
-```
-
-This tests the existing package; rebuild first after changing C# or the manifest.
-It runs the real game headlessly twice: once to generate fresh settings, then
-with mod loading enabled in that disposable account. It asserts:
-
-- The DLL initializes and all Harmony patches apply.
-- Startup reaches the main menu and exports a protocol-v1 `state.json`.
-- An unsupported `smoke_probe` command receives the matching error result and
-  its command file is consumed.
-- The marker CLI reaches the game, and the session contains ordered snapshots,
-  command results, markers, and a clean exit entry.
-
-The test mounts game files read-only, exposes no real home directory or Steam
-sockets, disables networking and Steam initialization, and uses temporary save
-data. No game install, real save, or Steam Cloud data is changed. Other installed
-mods are excluded. There is no unsandboxed fallback.
-
-Before patching, the mod loads `libgcc_s.so.1` with global symbol visibility on
-Linux for the installed Harmony/MonoMod native helper. Neither Steam launch
-options nor test-only `LD_PRELOAD` are required. The headless game also emits
-FMOD and dummy-renderer/exit warnings, including without the mod; those are
-retained in the logs. Managed errors and bridge startup/export/command failures
-fail the test.
-
-Logs, state, command results, and recordings are retained under
-`dist/smoke/run-*/`; temporary save data is deleted.
-
-## Repeatable mystery-room tests
-
-```sh
-mise exec dotnet@9 -- ./build-and-deploy.sh events
-python3 -m unittest discover -s tests -p 'test_*.py' -v
-```
-
-`events` tests the existing package. It builds a **separate test-only DLL** and
-runs eighteen paths in fresh, seeded, unsaved Ironclad runs inside the same offline
-sandbox. It uses the game's debug room entry followed by ordinary bridge actions;
-it does not use AutoSlay or replace gameplay resolution:
-
-- Neow → forced Scroll Boxes / Neow's Torment / Silken Tress offers → verify
-  Fury, Exhaust, Glam, and Replay explanations → choose Torment → verify the
-  obtained card and owned relic → map. Repeated reads must not change previews
-  or player/deck state. Only the test fixture forces these offers.
-- Morphic Grove → Loner → +5 max HP → map.
-- Wellspring → Bottle → potion reward → finished event → map.
-- Wellspring → Bathe → deck removal → curse → finished event → map.
-- Battleworn Dummy → three end turns → finished parent event → map.
-- Round Tea Party → Pick a Fight → Continue → lose 11 HP, gain one relic → map.
-  Checks resolved effect text and an empty continuation description, not a raw
-  localization diagnostic.
-- Architect → second-visit Threaten → Continue → Proceed choice. Checks empty
-  choice descriptions and native dialogue transitions; does not dismiss results.
-- Crystal Sphere → custom minigame → explicit `unsupported` state and safe command
-  rejection. **Minigame automation is not implemented**; manual play still works.
-- Aroma of Chaos → upgrade choices → compare native View Upgrades previews →
-  upgrade Pommel Strike → finished event → map. The fixture adds a large deck,
-  modified/duplicate cards, and non-upgradable cards to test preview coverage.
-- The Trial → two-card transform → range removal, multi-upgrade, enchantment,
-  and simple selectors. Checks partial-selection updates, toggles, bounds,
-  preview/confirmation boundaries, map blocking, and exact deck effects.
-- Merchant → resolved card/relic/potion effects → purchase a modified Headbutt →
-  map → rest site. Checks numeric energy gain, keywords, prices, repeated-read stability,
-  unchanged player RNG/card registration, singular/plural Smith text, and Regal
-  Pillow's extra heal text against an actual rest (31 → 70 HP).
-- Fake Merchant → six native fake relic offers → buy Lee's Waffle → close/reopen
-  → map, plus a separate no-purchase path. Checks actual prices and fake effects,
-  exact payment and healing (31 → 39 HP), one award, stable offers/RNG, and rejection
-  of stale, unaffordable, closed, blocked, and map-covered shop actions. Uses the
-  same `merchant` snapshot and commands as an ordinary shop; `run.event_id` stays
-  `FAKE_MERCHANT`. The Foul Potion combat branch is not covered by these tests.
-- Treasure → open → take Blood Vial → map, and a separate Skip path. Checks
-  native descriptions, hidden initialized/uninitialized reward holders, stable
-  reads, exactly one award, and rejection of repeat opening/selection.
-- Silver Crucible → genuinely empty treasure chest → map. Verifies that no
-  phantom relic appears and neither relics nor gold are awarded.
-- Rest → map → ordinary monster, and final campfire → map → Act 1 boss. Checks
-  the complete graph against the native map, including start/boss points, native
-  button eligibility, exactly one normal map vote, and actual combat entry.
-  Closed/view-only maps and invalid, current, nonadjacent, and stale destinations
-  must reject travel without changing the run.
-
-The fixture DLL refuses to run outside the offline `/test/` user-data directory.
-The normal installer never installs it. Each fixture exports the installed game's
-event catalog and retains its session for diagnosis. This is representative
-transition coverage, not exhaustive coverage of every event or character.
-
-Run one case (after building fixtures), or verify recording failure isolation:
-
-```sh
-python3 tests/smoke.py \
-  --game-dir "$HOME/.local/share/Steam/steamapps/common/Slay the Spire 2" \
-  --package-dir dist/local --fixture-dir dist/fixtures --case morphic-loner
-# Add --recording-failure to block recording storage in the sandbox.
-# The event must still complete and mark must report that it was not saved.
-```
-
 ## Combat context and previews
 
-```sh
-mise exec dotnet@9 -- ./build-and-deploy.sh build
-mise exec dotnet@9 -- ./build-and-deploy.sh combat
-```
-
-The combat fixture uses the same offline sandbox. It checks upgraded/duplicate
-cards, generated cards, draw/exhaust/reshuffle identity, actual plays versus
-end-turn discards, history reset between combats, resource eligibility, visible
-powers, relic counters, and calculated intents. It compares card previews with
-real damage/block under Strength, Weak, Vulnerable, Dexterity and Frail, and checks
-Ornamental Fan before/after its third-attack trigger. Synthetic multi-hit and
-hidden intents test export shape; those synthetic moves are never executed.
-The fixture then wins through an ordinary card play, collects other loot before
-the last card reward, and verifies that the completed rewards screen still
-exports `scene: rewards`, `waiting_for_input: true`, and an empty reward list with
-`proceed_enabled: true`. The ordinary `proceed` command must reach the map; it
-must not operate on a covered or already-dismissed rewards screen.
-
-Snapshots now include:
+Snapshots include:
 
 - `deck`: permanent deck instances; `hand` plus `piles.draw`, `discard`, `exhaust`,
   and `play`: current combat instances. `deck_card_id` links combat copies to
@@ -481,7 +257,7 @@ Snapshots now include:
   eligible hand-card target has variable previews calculated through the game's
   own hooks on **cloned** variables. A missing/null target means submit no target
   (including Self cards). `playable` checks resources and prevention hooks; use it
-  only with `scene: combat` and `waiting_for_input: true`. In selectors the legacy
+  only with `scene: combat` and `waiting_for_input: true`. In selectors the
   `playable` field means selectable, not playable in combat.
 
 **These are observations and card-variable previews, not a turn simulator.**
@@ -489,9 +265,7 @@ Preview decimals may be rounded by actual resolution. They do not encompass all
 after-play effects, generated cards, random outcomes, or effects of earlier
 hypothetical actions. For example, Ornamental Fan's third attack grants 4
 unpowered block after play; it is not part of that attack's card variables and
-Dexterity/Frail do not modify it. A future planner needs verified trigger rules
-or isolated engine rollouts, explicit incomplete-coverage reporting, and must
-avoid double-counting relic modifiers already included in card previews.
+Dexterity/Frail do not modify it.
 
 ## Potion rewards and replacement
 
@@ -523,10 +297,6 @@ For a full belt, the agent can choose either path:
 Discard is supported on ordinary room/map/reward/shop screens and during idle
 player combat input. It rejects stale IDs, queued/locked potions, dead/game-over
 players, and covered card selectors. `use_potion` remains combat-only.
-The offline `potion-rewards` case (included in `./build-and-deploy.sh combat`)
-checks both paths, duplicate/same-slot replacement, native skip restrictions,
-unchanged RNG on reads, belt expansion, discard versus use effects, and terminal
-reward departure/history. Multiplayer remains unverified.
 
 ## Opened card-reward alternatives and relic previews
 
@@ -554,20 +324,10 @@ selections reject commands. An empty `alternatives` list does not authorize a
 synthetic Skip. Other card selectors do not expose this field. `proceed` still
 does not operate through a card-selection overlay.
 
-Relic reward rows now include the offered instance's formatted `description`,
+Relic reward rows include the offered instance's formatted `description`,
 `model_id`, `rarity`, `base_values`, and `hover_tips` **before pickup**. The row's
 `id` remains the action ID for `take_reward`. Reads do not populate/reroll rewards,
 award relics, or execute alternative effects.
-
-The offline `card-rewards` case (included in `./build-and-deploy.sh combat`)
-checks skip/reopen, required offers, native reroll, Pael's Wing sacrifice,
-multiple card rewards, stale/disabled/hidden/covered buttons, ordinary card
-selection, terminal map departure/history, and pre-pickup relic mechanics
-(including a modified instance and a randomly populated relic). It verifies
-unchanged player RNG, inventory, and history during repeated preview reads.
-An offer containing Headbutt, before any combat, verifies that reward prompts
-come from the active screen rather than an offered card's on-play selection text.
-This is singleplayer coverage; multiplayer remains unverified.
 
 ## Combat-pile choices
 
@@ -582,7 +342,7 @@ though a card's play action may still be running while awaiting that choice.
 - `cards`: only the native grid's eligible cards, with the same instance IDs as
   the combat piles. Filters and live pile changes are respected. Draw choices
   are sorted independently of hidden draw order, including duplicate cards.
-- `selected_card_ids`: the current selected set. The legacy `playable` field
+- `selected_card_ids`: the current selected set. The `playable` field
   means the card can be clicked: selected cards can still be toggled off at the
   limit; additional unselected cards cannot be selected beyond it.
 - `require_manual_confirmation` and `confirm_available`: the latter follows the
@@ -596,14 +356,6 @@ cards are selected. Otherwise send `confirm_card_selection` when
 choice. `proceed` is not a confirmation command.
 As with other asynchronous commands, inspect the resulting state before acting
 again. Combat actions cannot run through the selection overlay.
-
-`./build-and-deploy.sh combat` also runs a separate pile-selection fixture:
-Hemokinesis → Fury → recover/replay Hemokinesis for lethal; optional zero/partial
-choices, toggles and limits; Hologram's mandatory discard choice; Secret Technique
-and Secret Weapon's filtered draw choices; and a native exhaust-pile selector
-whose selected card is removed while open. It checks actual card movement,
-identity, completion, invalid commands, and draw-order privacy. The exhaust case
-tests the native UI contract directly, not a particular card's effect.
 
 Ordinary pile-browsing screens and arbitrary custom selectors remain unsupported.
 
@@ -627,12 +379,6 @@ and potion use/discard are blocked. A choice hidden by Peek or another screen
 cannot be selected or confirmed through the bridge; human input must reveal it
 first. Completing the choice returns control to the suspended native action.
 
-The `combat-hand-selection` fixture runs Thinking Ahead (including redrawing the
-top-decked card), True Grit+, Survivor, and Armaments. It also checks multi-card
-bounds, toggles, zero/partial confirmation, filtered-out and stale IDs, map/peek
-blocking, and native deselection when a selected card no longer passes its filter.
-It runs under `./build-and-deploy.sh combat`, without accessing real saves.
-
 ## Deck selections and confirmation
 
 `deck_transform`, `deck_upgrade`, `deck_enchant`, and `deck_card_select` export
@@ -644,8 +390,7 @@ Every partial selection changes the snapshot, even before the minimum is met.
 maximum opens the native preview; it does not apply the effect. Cards cannot
 be clicked through that preview. A range selection can require two confirmations:
 Continue from the grid, then Confirm in the preview. Inspect the resulting state
-after each command, and confirm only while `confirm_available` is true. The
-bridge no longer forces completion after a click on an upgrade/removal screen.
+after each command, and confirm only while `confirm_available` is true.
 
 `simple_card_select` uses the same fields but follows its native preferences:
 it may auto-submit at the limit or require confirmation, including zero choices
@@ -671,19 +416,14 @@ On both `deck_upgrade` and `combat_hand_upgrade`, `select_card` selects the card
 automates the checkbox. Other selectors and ordinary deck snapshots omit
 `upgrade_preview`.
 
-The `events` suite checks damage/draw/cost changes, True Grit's random-to-chosen
-exhaust text, instance modifiers, repeated-read stability, native checkbox
-parity, and exactly one real upgrade after selecting and confirming the original
-card ID.
-
 ## Relevant mechanics in the observed state
 
 `hover_tips` accompanies event choices, cards (deck, combat piles, and selectors),
 owned relics, offered relics in selection/treasure screens, owned potions, and
 merchant items.
 It exports the **installed game's own tooltip list**, with resolved descriptions
-and original rich-text markup. No wiki, tier list, or decision runtime is needed.
-For example, Neow's Torment now includes Neow's Fury's 1-energy cost, 10 damage,
+and original rich-text markup.
+For example, Neow's Torment includes Neow's Fury's 1-energy cost, 10 damage,
 up-to-2-card discard recovery, and Exhaust explanation. Silken Tress includes
 Glam (Replay once per combat) and Replay (play an additional time).
 
@@ -699,12 +439,8 @@ Glam (Replay once per combat) and Replay (play an additional time).
   effect is trivial or fully modeled. Only supplied references are exported;
   the bridge does not enumerate hidden offers or recursively expand the catalog.
 
-This is a baseline lookup attached to relevant observations, **not a complete
-mechanics database or effect simulator**. Potion reward rows include a nested
-mechanics preview; other unopened reward types do not yet include this field.
-Missing game tooltips still need recording and
-targeted fixes. Ancient dialogue remains observable in `screen.visible_controls`;
-an absent event description is empty instead of a nonexistent localization key.
+Potion reward rows include a nested mechanics preview. Ancient dialogue is
+observable in `screen.visible_controls`; absent event descriptions are empty.
 
 Merchant items include native formatted descriptions, `model_id`, `base_values`,
 and relevant tooltips. Card offers also include a `card` snapshot with energy/star
@@ -741,41 +477,26 @@ The bridge does not enable debug travel or reconstruct adjacency rules itself.
 selectable on the active map. It uses the native selection/vote action, not a
 direct call to the downstream travel method. Wait for the resulting room state;
 a command acknowledgement is not proof that the transition has completed.
-The offline cases verify ordinary travel and the Act 1 boss; second-boss and
-multiplayer transitions are not yet playtested.
+Second-boss and multiplayer transitions are unverified.
 
-## Install for normal play
+## Session recordings
 
-Close the game, then explicitly install the package you built:
+Recording starts automatically when the mod loads. Add a note with the CLI:
 
 ```sh
-./build-and-deploy.sh install
+python3 "<skill-dir>/scripts/sts2_bridge.py" act mark --note "Finished Act 1"
 ```
 
-This copies only the two package files into `<game>/mods/sts2-bridge/`. Other mods
-are left alone. Installation refuses while `mods/FirstMod` exists, to prevent
-loading two bridge implementations. Enable mods in the game and restart if prompted.
-
-During normal play, bridge files live in Godot's `user://sts2-bridge`
-directory (normally `~/.local/share/SlayTheSpire2/sts2-bridge` on Linux):
-`state.json`, `command.json`, `command-result.json`, and `latest-session.json`. Write
-commands to a temporary file and rename it to `command.json`, using a unique
-`command_id`; wait for the matching result before submitting another command.
-
-## Record a playtest
-
-Recording starts automatically when the mod loads; play normally. No AI runtime
-or separate capture process is needed. From this repository:
+From a source checkout, inspect saved recordings with:
 
 ```sh
 python3 recording.py status
-python3 recording.py mark "Mystery room: had to select this card manually"
 ```
 
 `status` summarizes saved observations, unsupported screens, error counts, and
 notes; it is **not** a liveness check. A successful `mark` confirms that the
 running mod saved the note. Use `--bridge-dir PATH` before the subcommand to
-inspect another data directory, including a retained `dist/smoke/run-…` folder.
+select another data directory.
 Do not run another command writer concurrently. A timed-out marker may still be
 pending; it is not silently removed or resent.
 
@@ -789,8 +510,50 @@ deterministic replay or a complete capture of every click**. `observed_state_id`
 means the last exported observation, not that an asynchronous action is finished.
 
 Unsupported screens remain observable and playable by hand. Combat context is
-documented above; full action-outcome prediction is not implemented. Recordings stay local
-and persist across launches; there is no automatic deletion. Remove old session
-folders when no longer needed. If recording storage fails, gameplay continues,
-the game log reports the failure, and `mark` returns an error. The old `trace.log`
-is no longer written.
+documented above. Recordings stay local and persist across launches. Remove
+session folders manually when no longer needed. If recording storage fails,
+gameplay continues, the game log reports the failure, and `mark` returns an error.
+
+## Build from source
+
+**Requirements:** .NET 9 SDK and the installed game.
+
+On Linux:
+
+```sh
+./build-and-deploy.sh build
+./build-and-deploy.sh install  # Close the game first
+```
+
+Add `--game-dir PATH` for a different Steam library. On Windows, use
+`.\build-and-deploy.ps1 build` and `.\build-and-deploy.ps1 install`, with
+`-GameDir PATH` for a different library. Builds write the DLL and manifest to
+`dist/local/`; installation copies them into the game's `mods/sts2-bridge/`.
+
+Tests require Python 3 and, for game fixtures, Linux with bubblewrap (`bwrap`):
+
+```sh
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+./build-and-deploy.sh smoke
+./build-and-deploy.sh events
+./build-and-deploy.sh combat
+```
+
+Game tests use disposable offline save data. Logs and recordings are retained in
+`dist/smoke/run-*/`.
+
+`python3 release.py --tag v0.1.0` builds against
+[Book.StS2.RefLib 0.107.1](https://www.nuget.org/packages/Book.StS2.RefLib/0.107.1)
+and writes the DLL, manifest, ZIP, license, and checksums to `dist/release/`.
+Reference assemblies are compile-only and excluded from the package.
+
+## License
+
+Bridge code is [MIT licensed](LICENSE). Game content and third-party dependencies
+remain under their owners' terms.
+
+The repository's `icon.svg` and raster `mod_image.png` use the default Godot
+project-icon styling and Godot Engine logo, copyright © 2017 Andrea Calabró,
+licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+([upstream notice](https://github.com/godotengine/godot/blob/master/misc/logo/LICENSE.txt)).
+These repository-only images are excluded from the release package.

@@ -3,11 +3,20 @@
     <TargetFramework>net9.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <Nullable>enable</Nullable>
+    <RootNamespace>Sts2Bridge</RootNamespace>
+    <Version>0.1.0</Version>
     <GameDataDir Condition="'$(GameDataDir)' == '' and '$(OS)' != 'Windows_NT'">$(HOME)/.local/share/Steam/steamapps/common/Slay the Spire 2/data_sts2_linuxbsd_x86_64</GameDataDir>
-    <!-- The legacy Windows script refreshes these references before building. -->
-    <GameDataDir Condition="'$(GameDataDir)' == ''">$(MSBuildProjectDirectory)</GameDataDir>
+    <GameDataDir Condition="'$(GameDataDir)' == ''">$(MSBuildProgramFiles32)/Steam/steamapps/common/Slay the Spire 2/data_sts2_windows_x86_64</GameDataDir>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseReferenceAssemblies)' == 'true'">
+    <!-- Compile-only, permission-backed stubs. Never package these with the mod. -->
+    <PackageReference Include="Book.StS2.RefLib" Version="0.107.1"
+                      IncludeAssets="compile" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseReferenceAssemblies)' != 'true'">
     <Reference Include="0Harmony">
       <HintPath>$(GameDataDir)/0Harmony.dll</HintPath>
       <Private>false</Private>
@@ -17,7 +26,8 @@
       <Private>false</Private>
     </Reference>
   </ItemGroup>
-  <Target Name="ValidateGameReferences" BeforeTargets="ResolveAssemblyReferences">
+  <Target Name="ValidateGameReferences" BeforeTargets="ResolveAssemblyReferences"
+          Condition="'$(UseReferenceAssemblies)' != 'true'">
     <Error Condition="!Exists('$(GameDataDir)/sts2.dll') or !Exists('$(GameDataDir)/0Harmony.dll')"
            Text="Game assemblies not found in $(GameDataDir). Set -p:GameDataDir to the installed game's data directory." />
   </Target>

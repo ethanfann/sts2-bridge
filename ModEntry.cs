@@ -1,7 +1,7 @@
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
 
-namespace FirstMod;
+namespace Sts2Bridge;
 
 [ModInitializer("ModLoaded")]
 public static class ModEntry

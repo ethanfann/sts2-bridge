@@ -1,6 +1,6 @@
 ﻿Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 2012
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FirstMod", "FirstMod.csproj", "{D05B9CF9-08C5-4FB4-83B4-5D4803D58019}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "sts2-bridge", "sts2-bridge.csproj", "{D05B9CF9-08C5-4FB4-83B4-5D4803D58019}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

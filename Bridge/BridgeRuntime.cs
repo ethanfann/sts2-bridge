@@ -1,12 +1,13 @@
 using System;
 using Godot;
 using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext;
 
-namespace FirstMod.Bridge;
+namespace Sts2Bridge.Bridge;
 
 internal static partial class BridgeRuntime
 {
-    private const string BridgeNodeName = "FirstModBridge";
+    private const string BridgeNodeName = "Sts2Bridge";
     private static BridgeNode? _bridgeNode;
 
     public static void Initialize()
@@ -18,11 +19,13 @@ internal static partial class BridgeRuntime
 
         if (Engine.GetMainLoop() is not SceneTree tree)
         {
-            Log.Warn("FirstMod bridge did not start: SceneTree unavailable.");
+            Log.Warn("STS2 Bridge did not start: SceneTree unavailable.");
             return;
         }
 
+        TraceRecorder.Start();
         ExportHooks.Apply();
+        ActiveScreenContext.Instance.Updated += RequestExport;
 
         if (tree.Root.GetNodeOrNull<BridgeNode>(BridgeNodeName) is BridgeNode existingNode)
         {
@@ -35,7 +38,7 @@ internal static partial class BridgeRuntime
         tree.Root.CallDeferred(Node.MethodName.AddChild, bridgeNode);
         _bridgeNode = bridgeNode;
 
-        Log.Warn($"FirstMod bridge writing state to {StateExporter.StateFilePath}");
+        Log.Warn($"STS2 Bridge writing state to {StateExporter.StateFilePath}");
     }
 
     public static void RequestExport()
@@ -115,7 +118,8 @@ internal static partial class BridgeRuntime
                 }
 
                 string stateJson = StateExporter.BuildStateJson(stableSnapshot);
-                StateExporter.WriteStateJson(stateJson);
+                StateExporter.WriteStateJson(stateJson, stableSnapshot);
+                TraceRecorder.RecordState(stateJson);
                 _lastStableStateJson = stableStateJson;
                 _errorCount = 0;
             }
@@ -123,7 +127,12 @@ internal static partial class BridgeRuntime
             {
                 if (_errorCount < 5)
                 {
-                    Log.Error($"FirstMod bridge export failed: {exception}");
+                    Log.Error($"STS2 Bridge export failed: {exception}");
+                    TraceRecorder.Record("export_error", new
+                    {
+                        error = exception.ToString(),
+                        screen = ScreenDiagnostics.CaptureForError(),
+                    });
                 }
 
                 _errorCount += 1;
@@ -134,6 +143,8 @@ internal static partial class BridgeRuntime
         {
             if (ReferenceEquals(_bridgeNode, this))
             {
+                ActiveScreenContext.Instance.Updated -= BridgeRuntime.RequestExport;
+                TraceRecorder.Record("session_end", new { reason = "bridge_node_exited" });
                 _bridgeNode = null;
             }
         }

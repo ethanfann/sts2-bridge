@@ -8,9 +8,11 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
+using MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext;
 using MegaCrit.Sts2.Core.Runs;
 
-namespace FirstMod.Bridge;
+namespace Sts2Bridge.Bridge;
 
 internal static class CommandProcessor
 {
@@ -98,7 +100,24 @@ internal static class CommandProcessor
     {
         try
         {
-            TraceRecorder.Log("command.received", ("type", command.Type), ("command_id", command.CommandId));
+            TraceRecorder.Record("command", command);
+            if (command.ExpectedStateId is not null && !StateExporter.MatchesCurrentObservation(command.ExpectedStateId))
+            {
+                BridgeRuntime.RequestExport();
+                return Error(command.CommandId, "Observed state is stale; read state again. Nothing was executed.");
+            }
+            if (command.Type == "mark")
+            {
+                bool recorded = TraceRecorder.Record("marker", new { command.CommandId, command.Note, screen = ScreenDiagnostics.CaptureForError() });
+                BridgeRuntime.RequestExport();
+                return recorded ? Success(command.CommandId, "Playtest marker recorded.")
+                    : Error(command.CommandId, "Recording is unavailable; marker was not saved.");
+            }
+            object? screen = ActiveScreenContext.Instance.GetCurrentScreen();
+            if (!ScreenDiagnostics.IsSupported(screen))
+            {
+                return Error(command.CommandId, $"Unsupported active screen '{screen?.GetType().Name}'; manual input required.");
+            }
             return command.Type switch
             {
                 "end_turn" => ExecuteEndTurn(command),
@@ -114,14 +133,17 @@ internal static class CommandProcessor
                 "skip_reward" => ExecuteSkipReward(command),
                 "select_map_point" => ExecuteSelectMapPoint(command),
                 "select_card" => ExecuteSelectCard(command),
+                "select_card_reward_alternative" => ExecuteSelectCardRewardAlternative(command),
+                "confirm_card_selection" => ExecuteConfirmCardSelection(command),
                 "select_choice" => ExecuteSelectChoice(command),
                 "use_potion" => ExecuteUsePotion(command),
+                "discard_potion" => ExecuteDiscardPotion(command),
                 _ => Error(command.CommandId, $"Unsupported command type '{command.Type}'."),
             };
         }
         catch (Exception exception)
         {
-            Log.Error($"FirstMod bridge command failed: {exception}");
+            Log.Error($"STS2 Bridge command failed: {exception}");
             return Error(command.CommandId, exception.Message);
         }
     }
@@ -307,6 +329,33 @@ internal static class CommandProcessor
         return Success(command.CommandId, $"Selected card '{command.CardId}'.");
     }
 
+    private static CommandResult ExecuteSelectCardRewardAlternative(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.OptionId))
+        {
+            return Error(command.CommandId, "select_card_reward_alternative requires option_id.");
+        }
+
+        if (!BridgeIntrospection.TrySelectCardRewardAlternative(command.OptionId))
+        {
+            return Error(command.CommandId, $"Card reward alternative '{command.OptionId}' is not available.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Selected card reward alternative '{command.OptionId}'.");
+    }
+
+    private static CommandResult ExecuteConfirmCardSelection(BridgeCommand command)
+    {
+        if (!BridgeIntrospection.TryConfirmCardSelection())
+        {
+            return Error(command.CommandId, "Card selection confirmation is not available.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, "Card selection confirmed.");
+    }
+
     private static CommandResult ExecuteProceed(BridgeCommand command)
     {
         RunManager? runManager = RunManager.Instance;
@@ -377,7 +426,7 @@ internal static class CommandProcessor
 
         if (!BridgeIntrospection.TrySkipReward(command.RewardId))
         {
-            return Error(command.CommandId, $"Reward '{command.RewardId}' could not be skipped.");
+            return Error(command.CommandId, $"Reward '{command.RewardId}' could not be skipped. It must be the last remaining reward with Skip enabled; collect other loot first, or use proceed to leave all remaining rewards.");
         }
 
         BridgeRuntime.RequestExport();
@@ -405,6 +454,24 @@ internal static class CommandProcessor
 
         BridgeRuntime.RequestExport();
         return Success(command.CommandId, $"Selected map point '{command.PointId}'.");
+    }
+
+    private static CommandResult ExecuteDiscardPotion(BridgeCommand command)
+    {
+        if (string.IsNullOrEmpty(command.PotionId))
+        {
+            return Error(command.CommandId, "discard_potion requires potion_id.");
+        }
+
+        RunState? runState = BridgeIntrospection.GetRunState(RunManager.Instance);
+        Player? player = BridgeIntrospection.GetPrimaryPlayer(BridgeIntrospection.GetCombatState(runState), runState);
+        if (player is null || !BridgeIntrospection.TryDiscardPotion(player, command.PotionId))
+        {
+            return Error(command.CommandId, $"Potion '{command.PotionId}' could not be discarded.");
+        }
+
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Queued discard of potion '{command.PotionId}'. Wait for the belt to update before taking a replacement.");
     }
 
     private static CommandResult ExecuteUsePotion(BridgeCommand command)
@@ -458,7 +525,9 @@ internal static class CommandProcessor
 
     private static bool IsWaitingForInput(RunManager runManager, CombatManager combatManager, PlayerCombatState? playerCombatState)
     {
-        if (!combatManager.IsInProgress || playerCombatState?.Phase != PlayerTurnPhase.Play || combatManager.PlayerActionsDisabled)
+        if (ActiveScreenContext.Instance.GetCurrentScreen() is not NCombatRoom
+            || BridgeIntrospection.HasPendingHandSelection
+            || !combatManager.IsInProgress || playerCombatState?.Phase != PlayerTurnPhase.Play || combatManager.PlayerActionsDisabled)
         {
             return false;
         }
@@ -510,7 +579,9 @@ internal static class CommandProcessor
     {
         Directory.CreateDirectory(StateExporter.StateDirectoryPath);
         string payload = JsonSerializer.Serialize(result, JsonOptions);
-        File.WriteAllText(ResultFilePath, payload);
+        File.WriteAllText(ResultFilePath + ".tmp", payload);
+        File.Move(ResultFilePath + ".tmp", ResultFilePath, true);
+        TraceRecorder.Record("command_result", result);
     }
 
     private static void DeleteCommandFile()
@@ -562,6 +633,12 @@ internal sealed record BridgeCommand
 
     [property: JsonPropertyName("type")]
     public required string Type { get; init; }
+
+    [property: JsonPropertyName("expected_state_id")]
+    public string? ExpectedStateId { get; init; }
+
+    [property: JsonPropertyName("note")]
+    public string? Note { get; init; }
 
     [property: JsonPropertyName("card_id")]
     public string? CardId { get; init; }

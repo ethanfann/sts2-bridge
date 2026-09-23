@@ -1,5 +1,11 @@
 # STS2 Agent Monorepo Architecture
 
+> Historical architecture proposal. The [current milestone plan](ROADMAP.md)
+> supersedes the milestones and "recommended next step" below. This document's
+> proposed layout and protocol are not a description of all implemented behavior;
+> see the [README](README.md) for the current bridge. A monorepo migration is not
+> required for the next playtest.
+
 ## Purpose
 
 Define the recommended monorepo architecture for building a **Slay the Spire 2 AI agent** using the easiest reliable path:

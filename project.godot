@@ -10,10 +10,10 @@ config_version=5
 
 [application]
 
-config/name="FirstMod"
+config/name="sts2-bridge"
 config/features=PackedStringArray("4.5", "C#", "Forward Plus")
 config/icon="res://icon.svg"
 
 [dotnet]
 
-project/assembly_name="FirstMod"
+project/assembly_name="sts2-bridge"

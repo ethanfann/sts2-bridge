@@ -2,29 +2,54 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 using Godot;
+using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
+using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.GameActions;
+using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Hooks;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Cards;
+using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
+using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Events.Custom;
+using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
+using MegaCrit.Sts2.Core.Nodes.Potions;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
 using MegaCrit.Sts2.Core.Nodes.RestSite;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic;
 using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext;
+using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Runs;
 
-namespace FirstMod.Bridge;
+namespace Sts2Bridge.Bridge;
 
 internal static class BridgeIntrospection
 {
+    private sealed record PotionIdentity(string Id);
+    private static readonly ConditionalWeakTable<PotionModel, PotionIdentity> PotionIdentities = new();
+
     public static RunState? GetRunState(RunManager? runManager)
     {
         if (runManager is null)
@@ -100,7 +125,7 @@ internal static class BridgeIntrospection
 
     private static object? GetMutableEventModel(RunState? runState)
     {
-        object? currentRoom = GetCurrentRoom(runState);
+        object? currentRoom = runState?.BaseRoom ?? GetCurrentRoom(runState);
         if (currentRoom is null)
         {
             return null;
@@ -196,6 +221,11 @@ internal static class BridgeIntrospection
     public static List<ChoiceSnapshot> BuildChoiceSnapshots(RunState? runState)
     {
         List<ChoiceSnapshot> choices = [];
+        if (ActiveScreenContext.Instance.GetCurrentScreen() is not NEventRoom
+            || GetEventModel(runState) is EventModel { IsFinished: true })
+        {
+            return choices;
+        }
         IEnumerable? currentOptions = GetCurrentOptions(runState);
         if (currentOptions is null)
         {
@@ -216,9 +246,13 @@ internal static class BridgeIntrospection
                 Id = BuildChoiceId(option, index),
                 Title = GetOptionTitle(option),
                 Description = GetOptionDescription(option),
+                HoverTips = option is EventOption eventOption ? HoverTipExporter.Build(eventOption.HoverTips) : [],
+                RelicModelId = (option as EventOption)?.Relic?.Id.Entry,
                 Locked = GetBoolProperty(option, "IsLocked"),
                 Proceed = GetBoolProperty(option, "IsProceed"),
-                WillKillPlayer = GetBoolProperty(option, "WillKillPlayer"),
+                WillKillPlayer = option is EventOption typedOption
+                    && GetPrimaryPlayer(null, runState) is Player owner
+                    && typedOption.WillKillPlayer?.Invoke(owner) == true,
             });
             index += 1;
         }
@@ -234,25 +268,100 @@ internal static class BridgeIntrospection
             return null;
         }
 
+        if (screen is NPlayerHand hand)
+        {
+            CardSelectorPrefs handPrefs = (CardSelectorPrefs)GetFieldValue(hand, "_prefs")!;
+            List<CardModel> selected = (List<CardModel>)GetFieldValue(hand, "_selectedCards")!;
+            return new CardSelectionContextSnapshot
+            {
+                Kind = hand.CurrentMode == NPlayerHand.Mode.UpgradeSelect ? "combat_hand_upgrade" : "combat_hand",
+                SourcePile = "hand",
+                Prompt = handPrefs.Prompt.GetFormattedText(),
+                MinSelect = handPrefs.MinSelect,
+                MaxSelect = handPrefs.MaxSelect,
+                // NPlayerHand never auto-submits on click, regardless of prefs.
+                RequireManualConfirmation = true,
+                Cancelable = false,
+                SelectedCardIds = selected.Select(CardStateExporter.Id).ToList(),
+                ConfirmAvailable = GetHandConfirmButton(hand) is not null,
+                Cards = GetCardSelectionItems(hand).Cast<CardModel>().Select(card =>
+                    CardStateExporter.BuildCard(card) with
+                    {
+                        Playable = selected.Contains(card) || selected.Count < handPrefs.MaxSelect,
+                        UpgradePreview = hand.CurrentMode == NPlayerHand.Mode.UpgradeSelect
+                            ? CardStateExporter.BuildUpgradePreview(card) : null,
+                    }).ToList(),
+            };
+        }
+
+        if (screen is NCombatPileCardSelectScreen pileScreen)
+        {
+            CardSelectorPrefs pilePrefs = (CardSelectorPrefs)GetFieldValue(pileScreen, "_prefs")!;
+            HashSet<CardModel> selected = (HashSet<CardModel>)GetFieldValue(pileScreen, "_selectedCards")!;
+            CardPile pile = (CardPile)GetFieldValue(pileScreen, "_pile")!;
+            return new CardSelectionContextSnapshot
+            {
+                Kind = "combat_pile",
+                SourcePile = pile.Type.ToString().ToLowerInvariant(),
+                Prompt = pilePrefs.Prompt.GetFormattedText(),
+                MinSelect = pilePrefs.MinSelect,
+                MaxSelect = pilePrefs.MaxSelect,
+                RequireManualConfirmation = pilePrefs.RequireManualConfirmation,
+                Cancelable = false, // This screen has no cancel action, even if prefs requests one.
+                SelectedCardIds = selected.Select(CardStateExporter.Id).Order(StringComparer.Ordinal).ToList(),
+                ConfirmAvailable = GetCombatPileConfirmButton(pileScreen) is not null,
+                Cards = GetCardSelectionItems(pileScreen).Cast<CardModel>().Select(card =>
+                    CardStateExporter.BuildCard(card) with
+                    {
+                        // Clicking an already-selected card toggles it off, even at the limit.
+                        Playable = selected.Contains(card) || selected.Count < pilePrefs.MaxSelect,
+                    }).ToList(),
+            };
+        }
+
+        if (screen is NCardGridSelectionScreen gridScreen)
+        {
+            CardSelectorPrefs gridPrefs = (CardSelectorPrefs)GetFieldValue(screen, "_prefs")!;
+            HashSet<CardModel> selected = (HashSet<CardModel>)GetFieldValue(screen, "_selectedCards")!;
+            bool interactive = IsSelectionGridInteractive(gridScreen);
+            return new CardSelectionContextSnapshot
+            {
+                Kind = GetCardSelectionKind(screen),
+                Prompt = gridPrefs.Prompt.GetFormattedText(),
+                MinSelect = gridPrefs.MinSelect,
+                MaxSelect = gridPrefs.MaxSelect,
+                // Deck screens always open a confirmation preview at the limit,
+                // even when RequireManualConfirmation is false (e.g. The Trial).
+                RequireManualConfirmation = screen is not NSimpleCardSelectScreen || gridPrefs.RequireManualConfirmation,
+                Cancelable = gridPrefs.Cancelable,
+                SelectedCardIds = selected.Select(CardStateExporter.Id).Order(StringComparer.Ordinal).ToList(),
+                ConfirmAvailable = GetGridConfirmButton(gridScreen) is not null,
+                Cards = GetCardSelectionItems(screen).Cast<CardModel>().Select(card =>
+                    CardStateExporter.BuildCard(card) with
+                    {
+                        Playable = interactive && (selected.Contains(card) || selected.Count < gridPrefs.MaxSelect),
+                        UpgradePreview = screen is NDeckUpgradeSelectScreen
+                            ? CardStateExporter.BuildUpgradePreview(card) : null,
+                    }).ToList(),
+            };
+        }
+
         IEnumerable screenCards = GetCardSelectionItems(screen);
         List<CardSnapshot> cards = [];
         int index = 0;
         foreach (object? screenCard in screenCards)
         {
-            if (screenCard is null)
+            if (screenCard is null || GetCardModel(screenCard) is not CardModel card)
             {
                 index += 1;
                 continue;
             }
 
-            cards.Add(new CardSnapshot
+            cards.Add(CardStateExporter.BuildCard(card) with
             {
-                Id = BuildCardId(screenCard, index),
-                Name = GetCardName(screenCard),
-                Description = GetCardDescription(screenCard),
-                Cost = GetCardCostText(screenCard),
-                Rarity = GetCardRarity(screenCard),
                 Playable = true,
+                UpgradePreview = screen is NDeckUpgradeSelectScreen
+                    ? CardStateExporter.BuildUpgradePreview(card) : null,
             });
             index += 1;
         }
@@ -267,8 +376,60 @@ internal static class BridgeIntrospection
             MaxSelect = GetCardSelectionMaxSelect(kind, prefs),
             RequireManualConfirmation = GetBoolPropertyValue(prefs, "RequireManualConfirmation"),
             Cancelable = GetBoolPropertyValue(prefs, "Cancelable"),
+            Alternatives = screen is NCardRewardSelectionScreen rewardScreen
+                ? GetCardRewardAlternatives(rewardScreen).Select(entry => new CardRewardAlternativeSnapshot(
+                    BuildCardRewardAlternativeId(entry.Button), entry.Option.OptionId,
+                    entry.Option.Title.GetFormattedText(), entry.Option.AfterSelected.ToString(),
+                    CanSelectCardRewardAlternative(rewardScreen, entry.Button))).ToList() : null,
             Cards = cards,
         };
+    }
+
+    private static IEnumerable<(CardRewardAlternative Option, NCardRewardAlternativeButton Button)>
+        GetCardRewardAlternatives(NCardRewardSelectionScreen screen)
+    {
+        // Read the options already generated for this screen. Generate() runs
+        // model hooks and must never be called by an observation or a command.
+        if (GetFieldValue(screen, "_extraOptions") is not IReadOnlyList<CardRewardAlternative> options
+            || GetFieldValue(screen, "_rewardAlternativesContainer") is not Node container)
+            yield break;
+        var buttons = container.GetChildren().OfType<NCardRewardAlternativeButton>()
+            .Where(button => !button.IsQueuedForDeletion()).ToArray();
+        if (buttons.Length != options.Count)
+            yield break;
+        for (int i = 0; i < buttons.Length; i++)
+        {
+            if (IsNodeVisible(buttons[i]))
+                yield return (options[i], buttons[i]);
+        }
+    }
+
+    private static string BuildCardRewardAlternativeId(NCardRewardAlternativeButton button) =>
+        $"card_reward_alternative_{button.GetInstanceId().ToString(CultureInfo.InvariantCulture)}";
+
+    private static bool CanSelectCardRewardAlternative(NCardRewardSelectionScreen screen, NCardRewardAlternativeButton button) =>
+        ActiveScreenContext.Instance.IsCurrent(screen) && !screen.IsQueuedForDeletion()
+        && button.IsEnabled && !button.IsQueuedForDeletion() && IsNodeVisible(button)
+        && GetFieldValue(screen, "_completionSource") is TaskCompletionSource<int?> completion
+        && !completion.Task.IsCompleted;
+
+    public static bool TrySelectCardRewardAlternative(string optionId)
+    {
+        if (GetActiveCardSelectionScreen() is not NCardRewardSelectionScreen screen)
+            return false;
+        foreach (var entry in GetCardRewardAlternatives(screen))
+        {
+            if (BuildCardRewardAlternativeId(entry.Button) != optionId)
+                continue;
+            if (!CanSelectCardRewardAlternative(screen, entry.Button))
+                return false;
+            // The connected native callback completes the pending selection.
+            // CardReward then synchronizes the choice, runs its effect, and
+            // decides whether to close, consume, or refresh the reward.
+            entry.Button.EmitSignal(NClickableControl.SignalName.Released, entry.Button);
+            return true;
+        }
+        return false;
     }
 
     public static RelicSelectionContextSnapshot? BuildRelicSelectionContext()
@@ -296,7 +457,7 @@ internal static class BridgeIntrospection
 
     public static RestSiteContextSnapshot? BuildRestSiteContext(RunState? runState)
     {
-        NRestSiteRoom? roomNode = NRestSiteRoom.Instance;
+        NRestSiteRoom? roomNode = GetActiveRestSiteRoom();
         if (roomNode is null || !IsNodeVisible(roomNode))
         {
             return null;
@@ -318,7 +479,7 @@ internal static class BridgeIntrospection
                 {
                     Id = BuildRestSiteOptionId(restOption),
                     Title = GetLocalizedText(restOption.Title),
-                    Description = GetRawLocalizedText(restOption.Description),
+                    Description = restOption.Description.GetFormattedText(),
                     Enabled = restOption.IsEnabled,
                 });
             }
@@ -345,8 +506,8 @@ internal static class BridgeIntrospection
             return null;
         }
 
-        bool chestOpenAvailable = GetFieldValue(treasureRoom, "_chestButton") is Node chestButton && IsNodeVisible(chestButton);
-        bool proceedAvailable = treasureRoom.ProceedButton is Node proceedButton && IsNodeVisible(proceedButton);
+        bool chestOpenAvailable = IsTreasureChestOpenAvailable(treasureRoom);
+        bool proceedAvailable = treasureRoom.ProceedButton.IsEnabled && IsNodeVisible(treasureRoom.ProceedButton);
         return new TreasureContextSnapshot
         {
             ChestOpenAvailable = chestOpenAvailable,
@@ -357,34 +518,48 @@ internal static class BridgeIntrospection
 
     public static List<PotionSnapshot> BuildPotionSnapshots(Player? player)
     {
-        List<PotionSnapshot> potions = [];
-        if (player?.Potions is null)
+        return player?.Potions.Select(potion => BuildPotionSnapshot(potion, player)).ToList() ?? [];
+    }
+
+    private static PotionSnapshot BuildPotionSnapshot(PotionModel potion, Player? owner = null) => new()
+    {
+        // Offered potions are previews, not actionable inventory instances.
+        Id = owner is null ? null : BuildPotionId(potion),
+        ModelId = potion.Id.Entry,
+        SlotIndex = owner?.GetPotionSlotIndex(potion),
+        DiscardAvailable = owner is not null && CanDiscardPotion(owner, potion),
+        Title = GetLocalizedText(potion.Title),
+        Description = GetLocalizedText(potion.DynamicDescription),
+        HoverTips = HoverTipExporter.Build(potion.ExtraHoverTips),
+        BaseValues = potion.DynamicVars.ToDictionary(v => v.Key, v => v.Value.BaseValue),
+        Rarity = potion.Rarity.ToString(),
+        Usage = potion.Usage.ToString(),
+        TargetType = potion.TargetType.ToString(),
+    };
+
+    private static NPotionHolder? GetPotionHolder(PotionModel potion) => NRun.Instance is { } run
+        ? EnumerateNodes(run.GlobalUi.TopBar.PotionContainer).OfType<NPotionHolder>()
+            .FirstOrDefault(holder => holder.Potion?.Model == potion)
+        : null;
+
+    private static bool CanDiscardPotion(Player player, PotionModel potion)
+    {
+        if (!player.CanRemovePotions || !player.Creature.IsAlive || player.RunState.IsGameOver
+            || potion.IsQueued || potion.HasBeenRemovedFromState || !player.Potions.Contains(potion)
+            || RunManager.Instance.ActionExecutor.IsRunning || HasPendingHandSelection)
         {
-            return potions;
+            return false;
         }
 
-        int index = 0;
-        foreach (object? potionLike in player.Potions)
-        {
-            if (potionLike is not PotionModel potion)
-            {
-                continue;
-            }
-
-            string title = GetLocalizedText(potion.Title);
-            potions.Add(new PotionSnapshot
-            {
-                Id = BuildPotionId(title, index),
-                Title = title,
-                Description = GetLocalizedText(potion.DynamicDescription),
-                Rarity = potion.Rarity.ToString(),
-                Usage = potion.Usage.ToString(),
-                TargetType = potion.TargetType.ToString(),
-            });
-            index += 1;
-        }
-
-        return potions;
+        object? screen = ActiveScreenContext.Instance.GetCurrentScreen();
+        bool available = CombatManager.Instance.IsInProgress
+            ? screen is NCombatRoom && player.PlayerCombatState?.Phase == PlayerTurnPhase.Play
+                && !CombatManager.Instance.PlayerActionsDisabled
+            : screen is NRewardsScreen or NMapScreen or NMerchantRoom or NMerchantInventory
+                or NRestSiteRoom or NTreasureRoom or NEventRoom or NFakeMerchant;
+        NPotionHolder? holder = GetPotionHolder(potion);
+        return available && holder is not null && IsNodeVisible(holder)
+            && GetFieldValue(holder, "_disabledUntilPotionRemoved") is false;
     }
 
     public static RewardContextSnapshot? BuildRewardContext()
@@ -406,14 +581,22 @@ internal static class BridgeIntrospection
                 continue;
             }
 
+            string? unavailableReason = GetRewardUnavailableReason(button);
+            RelicModel? relic = (reward as RelicReward)?.Relic;
             rewards.Add(new RewardSnapshot
             {
                 Id = BuildRewardId(reward, index),
                 RewardType = GetPropertyText(reward, "RewardType"),
                 Title = GetRewardTitle(reward),
                 Description = GetRewardDescription(reward),
-                Skippable = IsRewardSkippable(reward),
-                Selectable = IsRewardButtonSelectable(button),
+                Potion = reward is PotionReward { Potion: { } potion } ? BuildPotionSnapshot(potion) : null,
+                ModelId = relic?.Id.Entry,
+                Rarity = relic?.Rarity.ToString(),
+                BaseValues = relic?.DynamicVars.ToDictionary(v => v.Key, v => v.Value.BaseValue),
+                HoverTips = relic is not null ? HoverTipExporter.Build(relic.HoverTipsExcludingRelic) : null,
+                Skippable = IsRewardButtonSelectable(button) && IsRewardSkippable(rewardsScreen),
+                Selectable = unavailableReason is null,
+                UnavailableReason = unavailableReason,
             });
             index += 1;
         }
@@ -427,18 +610,23 @@ internal static class BridgeIntrospection
 
     public static MerchantContextSnapshot? BuildMerchantContext()
     {
-        NMerchantRoom? merchantRoom = GetActiveMerchantRoom();
-        if (merchantRoom is null)
+        Node? merchantRoom = GetActiveMerchantRoom();
+        NMerchantInventory? inventory = GetActiveMerchantInventory();
+        if (merchantRoom is null && inventory is null)
         {
             return null;
         }
 
-        NMerchantInventory? inventory = merchantRoom.Inventory;
-        bool inventoryOpen = inventory is not null && inventory.IsOpen && IsNodeVisible(inventory);
-        bool enterShopAvailable = !inventoryOpen && merchantRoom.MerchantButton is Node merchantButton && IsNodeVisible(merchantButton);
-        bool leaveAvailable = inventoryOpen;
-        bool proceedAvailable = !inventoryOpen && merchantRoom.ProceedButton is Node proceedButton && IsNodeVisible(proceedButton);
-        List<MerchantItemSnapshot> items = inventoryOpen && inventory is not null ? BuildMerchantItems(inventory) : [];
+        bool inventoryOpen = inventory is not null;
+        bool roomInputAvailable = merchantRoom is not null
+            && merchantRoom.GetNodeOrNull<Control>("%InputBlocker")?.MouseFilter != Control.MouseFilterEnum.Stop;
+        NMerchantButton? merchantButton = merchantRoom?.GetNode<NMerchantButton>("%MerchantButton");
+        NProceedButton? proceedButton = merchantRoom?.GetNode<NProceedButton>("%ProceedButton");
+        bool enterShopAvailable = roomInputAvailable
+            && merchantButton is { IsEnabled: true, IsLocalPlayerDead: false } && IsNodeVisible(merchantButton);
+        bool leaveAvailable = inventory is not null && CanUseMerchantInventory(inventory);
+        bool proceedAvailable = roomInputAvailable && proceedButton is { IsEnabled: true } && IsNodeVisible(proceedButton);
+        List<MerchantItemSnapshot> items = inventory is not null ? BuildMerchantItems(inventory) : [];
 
         return new MerchantContextSnapshot
         {
@@ -453,30 +641,25 @@ internal static class BridgeIntrospection
     public static MapContextSnapshot? BuildMapContext(RunState? runState)
     {
         NMapScreen? mapScreen = NMapScreen.Instance;
-        if (mapScreen is null || !IsNodeVisible(mapScreen) || !mapScreen.IsOpen)
+        if (mapScreen is null || !ActiveScreenContext.Instance.IsCurrent(mapScreen) || !mapScreen.IsOpen)
         {
             return null;
         }
 
-        object? actMap = runState?.Map;
-        if (actMap is null)
+        if (runState?.Map is null)
         {
             return null;
         }
 
         HashSet<string> visitedPointIds = BuildVisitedPointIdSet(runState);
-        HashSet<string> travelablePointIds = BuildTravelablePointIdSet(mapScreen);
         string? currentPointId = BuildMapPointId(runState?.CurrentMapCoord);
 
         List<MapPointSnapshot> points = [];
-        IEnumerable allPoints = GetAllMapPoints(actMap);
-        foreach (object? point in allPoints)
+        // GetAllMapPoints() only enumerates the grid, excluding the ancient and
+        // boss nodes. The native screen contains every selectable map point.
+        foreach (NMapPoint node in EnumerateNodes(mapScreen).OfType<NMapPoint>())
         {
-            if (point is null)
-            {
-                continue;
-            }
-
+            MapPoint point = node.Point;
             string? pointId = BuildMapPointId(point);
             if (string.IsNullOrEmpty(pointId))
             {
@@ -494,7 +677,7 @@ internal static class BridgeIntrospection
                 Children = BuildChildPointIds(point),
                 Visited = visitedPointIds.Contains(pointId),
                 Current = string.Equals(pointId, currentPointId, StringComparison.Ordinal),
-                Travelable = travelablePointIds.Contains(pointId),
+                Travelable = CanSelectMapPoint(mapScreen, node),
             });
         }
 
@@ -524,7 +707,8 @@ internal static class BridgeIntrospection
         }
 
         NEventRoom? eventRoom = NEventRoom.Instance;
-        if (eventRoom is not null && IsNodeVisible(eventRoom))
+        if (eventRoom is not null && ActiveScreenContext.Instance.IsCurrent(eventRoom)
+            && GetEventModel(runState) is EventModel { IsFinished: true })
         {
             return new ProceedContextSnapshot
             {
@@ -549,9 +733,11 @@ internal static class BridgeIntrospection
             }
         }
 
-        NMerchantRoom? merchantRoom = GetActiveMerchantRoom();
-        if (TryProceedMerchantRoom(merchantRoom, runState))
+        Node? merchantRoom = GetActiveMerchantRoom();
+        if (merchantRoom is not null && BuildMerchantContext()?.ProceedAvailable == true)
         {
+            NProceedButton button = merchantRoom.GetNode<NProceedButton>("%ProceedButton");
+            button.EmitSignal(NClickableControl.SignalName.Released, button);
             return true;
         }
 
@@ -567,13 +753,11 @@ internal static class BridgeIntrospection
         }
 
         NTreasureRoom? treasureRoom = GetActiveTreasureRoom();
-        if (treasureRoom is not null && treasureRoom.ProceedButton is Node treasureProceedButton && IsNodeVisible(treasureProceedButton))
+        if (treasureRoom is not null && treasureRoom.ProceedButton.IsEnabled && IsNodeVisible(treasureRoom.ProceedButton))
         {
             MethodInfo? proceedPressed = treasureRoom.GetType().GetMethod("OnProceedButtonPressed", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            MethodInfo? proceedReleased = treasureRoom.GetType().GetMethod("OnProceedButtonReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             proceedPressed?.Invoke(treasureRoom, new object?[] { null });
-            proceedReleased?.Invoke(treasureRoom, new object?[] { null });
-            return proceedPressed is not null || proceedReleased is not null;
+            return proceedPressed is not null;
         }
 
         if (TryProceedPostCombat(runState))
@@ -582,7 +766,8 @@ internal static class BridgeIntrospection
         }
 
         NEventRoom? eventRoom = NEventRoom.Instance;
-        if (eventRoom is not null && IsNodeVisible(eventRoom))
+        if (eventRoom is not null && ActiveScreenContext.Instance.IsCurrent(eventRoom)
+            && GetEventModel(runState) is EventModel { IsFinished: true })
         {
             MethodInfo? proceedMethod = eventRoom.GetType().GetMethod("Proceed", BindingFlags.Public | BindingFlags.Static);
             proceedMethod?.Invoke(null, null);
@@ -594,31 +779,14 @@ internal static class BridgeIntrospection
 
     public static bool TryEnterMerchant()
     {
-        NMerchantRoom? merchantRoom = GetActiveMerchantRoom();
-        if (merchantRoom is null)
+        Node? merchantRoom = GetActiveMerchantRoom();
+        if (merchantRoom is null || BuildMerchantContext()?.EnterShopAvailable != true)
         {
             return false;
         }
 
-        if (merchantRoom.Inventory is not null && merchantRoom.Inventory.IsOpen)
-        {
-            return true;
-        }
-
-        MethodInfo? openInventory = merchantRoom.GetType().GetMethod("OpenInventory", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-        if (openInventory is not null)
-        {
-            openInventory.Invoke(merchantRoom, null);
-            return true;
-        }
-
-        Node? merchantButton = merchantRoom.MerchantButton;
-        if (merchantButton is null || !IsNodeVisible(merchantButton))
-        {
-            return false;
-        }
-
-        MethodInfo? onRelease = merchantButton.GetType().GetMethod("OnRelease", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        NMerchantButton merchantButton = merchantRoom.GetNode<NMerchantButton>("%MerchantButton");
+        MethodInfo? onRelease = typeof(NMerchantButton).GetMethod("OnRelease", BindingFlags.Instance | BindingFlags.NonPublic);
         if (onRelease is null)
         {
             return false;
@@ -628,140 +796,28 @@ internal static class BridgeIntrospection
         return true;
     }
 
-    private static bool TryProceedMerchantRoom(NMerchantRoom? merchantRoom, RunState? runState)
-    {
-        if (merchantRoom is null)
-        {
-            return false;
-        }
-
-        if (merchantRoom.ProceedButton is Node merchantProceedButton && IsNodeVisible(merchantProceedButton))
-        {
-            MethodInfo? onPress = merchantProceedButton.GetType().GetMethod("OnPress", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-            MethodInfo? onRelease = merchantProceedButton.GetType().GetMethod("OnRelease", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-            onPress?.Invoke(merchantProceedButton, null);
-            if (onRelease is not null)
-            {
-                onRelease.Invoke(merchantProceedButton, null);
-                InvokeParameterlessMethod(merchantRoom, "OnActiveScreenUpdated");
-                TryInvokeHideScreen(merchantRoom);
-                return true;
-            }
-        }
-
-        foreach (string methodName in new[] { "OnProceedButtonPressed", "OnProceedPressed", "OnProceedButtonReleased", "Proceed" })
-        {
-            if (TryInvokeSemanticMerchantProceed(merchantRoom, methodName, merchantRoom.ProceedButton))
-            {
-                return true;
-            }
-        }
-
-        object? room = GetMemberValue(merchantRoom, "Room");
-        if (runState is not null && room is not null)
-        {
-            MethodInfo? exitMethod = room.GetType().GetMethod("Exit", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { runState.GetType() }, null);
-            if (exitMethod is not null)
-            {
-                exitMethod.Invoke(room, new object[] { runState });
-                return true;
-            }
-        }
-
-        if (TryInvokeHideScreen(merchantRoom))
-        {
-            return true;
-        }
-
-        return false;
-    }
-
-    private static bool TryInvokeSemanticMerchantProceed(NMerchantRoom merchantRoom, string methodName, Node? proceedButton)
-    {
-        foreach (MethodInfo method in merchantRoom.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
-        {
-            if (!string.Equals(method.Name, methodName, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            ParameterInfo[] parameters = method.GetParameters();
-            if (parameters.Length == 0)
-            {
-                method.Invoke(merchantRoom, null);
-                return true;
-            }
-
-            if (parameters.Length == 1)
-            {
-                object? argument = null;
-                Type parameterType = parameters[0].ParameterType;
-                if (proceedButton is not null && parameterType.IsInstanceOfType(proceedButton))
-                {
-                    argument = proceedButton;
-                }
-
-                method.Invoke(merchantRoom, new[] { argument });
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool TryInvokeHideScreen(object source)
-    {
-        foreach (MethodInfo method in source.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
-        {
-            if (!string.Equals(method.Name, "HideScreen", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            ParameterInfo[] parameters = method.GetParameters();
-            if (parameters.Length == 0)
-            {
-                method.Invoke(source, null);
-                return true;
-            }
-
-            if (parameters.Length == 1)
-            {
-                method.Invoke(source, new object?[] { null });
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     public static bool TryLeaveMerchant()
     {
         NMerchantInventory? inventory = GetActiveMerchantInventory();
-        if (inventory is null)
+        if (inventory is null || !CanUseMerchantInventory(inventory))
         {
             return false;
         }
 
-        MethodInfo? close = inventory.GetType().GetMethod("Close", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-        if (close is null)
-        {
-            return false;
-        }
-
-        close.Invoke(inventory, null);
+        NBackButton button = inventory.GetNode<NBackButton>("%BackButton");
+        button.EmitSignal(NClickableControl.SignalName.Released, button);
         return true;
     }
 
     public static bool TryPurchaseMerchantItem(string itemId)
     {
         NMerchantInventory? inventory = GetActiveMerchantInventory();
-        if (inventory is null)
+        if (inventory is null || !CanUseMerchantInventory(inventory))
         {
             return false;
         }
 
-        if (!TryGetMerchantSlot(inventory, itemId, out NMerchantSlot? slot) || slot is null)
+        if (!TryGetMerchantSlot(inventory, itemId, out NMerchantSlot? slot) || slot is null || !IsNodeVisible(slot))
         {
             return false;
         }
@@ -772,23 +828,12 @@ internal static class BridgeIntrospection
             return false;
         }
 
-        MethodInfo? onRelease = slot.GetType().GetMethod("OnReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-        if (onRelease is not null)
+        // OnSelected is private on the base class, including for fake relic
+        // slots. Use the same entry point as mouse/controller selection.
+        MethodInfo? onSelected = typeof(NMerchantSlot).GetMethod("OnSelected", BindingFlags.Instance | BindingFlags.NonPublic);
+        if (onSelected?.Invoke(slot, null) is Task purchase)
         {
-            onRelease.Invoke(slot, null);
-            return true;
-        }
-
-        MethodInfo? onTryPurchase = slot.GetType().GetMethod("OnTryPurchase", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(MerchantInventory) }, null);
-        if (onTryPurchase is not null)
-        {
-            MerchantInventory? merchantInventory = inventory.Inventory;
-            if (merchantInventory is null)
-            {
-                return false;
-            }
-
-            onTryPurchase.Invoke(slot, new object[] { merchantInventory });
+            TaskHelper.RunSafely(purchase);
             return true;
         }
 
@@ -865,21 +910,21 @@ internal static class BridgeIntrospection
         return false;
     }
 
+    private static bool IsTreasureChestOpenAvailable(NTreasureRoom room) =>
+        GetFieldValue(room, "_hasChestBeenOpened") is not true
+        && GetFieldValue(room, "_chestButton") is NButton { IsEnabled: true } button
+        && IsNodeVisible(button);
+
     public static bool TryOpenTreasureChest()
     {
         NTreasureRoom? room = GetActiveTreasureRoom();
-        if (room is null)
+        if (room is null || !IsTreasureChestOpenAvailable(room))
         {
             return false;
         }
 
-        MethodInfo? openChest = room.GetType().GetMethod("OpenChest", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-        if (openChest is not null)
-        {
-            openChest.Invoke(room, null);
-            return true;
-        }
-
+        // Use the click handler, which disables the button immediately and
+        // observes the asynchronous opening task. Do not call OpenChest directly.
         MethodInfo? onChestButtonReleased = room.GetType().GetMethod("OnChestButtonReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         if (onChestButtonReleased is not null)
         {
@@ -903,11 +948,10 @@ internal static class BridgeIntrospection
             return false;
         }
 
-        MethodInfo? onPress = holder.GetType().GetMethod("OnPress", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-        MethodInfo? onRelease = holder.GetType().GetMethod("OnRelease", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-        onPress?.Invoke(holder, null);
-        onRelease?.Invoke(holder, null);
-        return onRelease is not null || onPress is not null;
+        // OnRelease alone only animates the holder. Emit the native Released
+        // signal after validating that this is an interactive offered relic.
+        holder.ForceClick();
+        return true;
     }
 
     public static bool TrySelectRelic(string relicId)
@@ -933,7 +977,6 @@ internal static class BridgeIntrospection
             return false;
         }
 
-        int index = 0;
         foreach (object? potionLike in player.Potions)
         {
             if (potionLike is not PotionModel potion)
@@ -941,11 +984,14 @@ internal static class BridgeIntrospection
                 continue;
             }
 
-            string title = GetLocalizedText(potion.Title);
-            if (!string.Equals(BuildPotionId(title, index), potionId, StringComparison.Ordinal))
+            if (!string.Equals(BuildPotionId(potion), potionId, StringComparison.Ordinal))
             {
-                index += 1;
                 continue;
+            }
+
+            if (!CanDiscardPotion(player, potion))
+            {
+                return false;
             }
 
             object? target = ResolveCommandTarget(targetId, combatState, player);
@@ -969,9 +1015,30 @@ internal static class BridgeIntrospection
         return false;
     }
 
+    public static bool TryDiscardPotion(Player player, string potionId)
+    {
+        PotionModel? potion = player.Potions.FirstOrDefault(p => BuildPotionId(p) == potionId);
+        if (potion is null || !CanDiscardPotion(player, potion))
+        {
+            return false;
+        }
+
+        // Match NPotionPopup: lock this holder until native removal/cancellation
+        // and enqueue the synchronized discard, including history and hooks.
+        GetPotionHolder(potion)!.DisableUntilPotionRemoved();
+        RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(new DiscardPotionGameAction(
+            player, (uint)player.GetPotionSlotIndex(potion), CombatManager.Instance.IsInProgress));
+        return true;
+    }
+
     public static bool TryTakeReward(string rewardId)
     {
         if (!TryGetRewardButton(rewardId, out NRewardsScreen? rewardsScreen, out NRewardButton? button) || rewardsScreen is null || button is null)
+        {
+            return false;
+        }
+
+        if (GetRewardUnavailableReason(button) is not null)
         {
             return false;
         }
@@ -983,8 +1050,7 @@ internal static class BridgeIntrospection
             return true;
         }
 
-        rewardsScreen.RewardCollectedFrom(button);
-        return true;
+        return false;
     }
 
     public static bool TrySkipReward(string rewardId)
@@ -994,42 +1060,31 @@ internal static class BridgeIntrospection
             return false;
         }
 
-        object? reward = button.Reward;
-        if (reward is not null)
-        {
-            MethodInfo? onSkipped = reward.GetType().GetMethod("OnSkipped", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-            if (onSkipped is not null)
-            {
-                onSkipped.Invoke(reward, null);
-                return true;
-            }
-        }
-
-        rewardsScreen.RewardSkippedFrom(button);
-        return true;
+        // OnSkipped only records history; RewardSkippedFrom only pulses Skip.
+        // The native lifecycle skips the SET on Proceed. Never silently drop
+        // other unclaimed loot for a command naming a single reward.
+        return IsRewardSkippable(rewardsScreen) && TryProceed(GetRunState(RunManager.Instance));
     }
 
     public static bool TrySelectMapPoint(RunState? runState, string pointId)
     {
         NMapScreen? mapScreen = NMapScreen.Instance;
-        if (mapScreen is null || !IsNodeVisible(mapScreen) || !mapScreen.IsOpen || !mapScreen.IsTravelEnabled || mapScreen.IsTraveling)
+        if (runState?.Map is null || mapScreen is null || !ActiveScreenContext.Instance.IsCurrent(mapScreen) || !mapScreen.IsOpen)
         {
             return false;
         }
 
-        object? actMap = runState?.Map;
-        if (actMap is null)
+        NMapPoint? point = EnumerateNodes(mapScreen).OfType<NMapPoint>()
+            .FirstOrDefault(node => string.Equals(BuildMapPointId(node.Point), pointId, StringComparison.Ordinal)
+                && CanSelectMapPoint(mapScreen, node));
+        if (point is null)
         {
             return false;
         }
 
-        MapCoord? coord = ParseMapCoord(pointId);
-        if (coord is not MapCoord resolvedCoord)
-        {
-            return false;
-        }
-
-        mapScreen.TravelToMapCoord(resolvedCoord);
+        // Follow the same selection/vote action as a click, not the downstream
+        // travel method which assumes the destination has already been checked.
+        mapScreen.OnMapPointSelectedLocally(point);
         return true;
     }
 
@@ -1044,6 +1099,39 @@ internal static class BridgeIntrospection
         if (!TryGetCardSelectionItem(screen, cardId, out object? card) || card is null)
         {
             return false;
+        }
+
+        if (screen is NPlayerHand hand)
+        {
+            CardSelectorPrefs prefs = (CardSelectorPrefs)GetFieldValue(hand, "_prefs")!;
+            List<CardModel> selected = (List<CardModel>)GetFieldValue(hand, "_selectedCards")!;
+            bool isSelected = selected.Contains((CardModel)card);
+            if (!isSelected && selected.Count >= prefs.MaxSelect)
+            {
+                return false;
+            }
+            // Selected cards move out of the ordinary hand-holder container.
+            // Upgrade mode instead puts the original card in a preview holder.
+            NCardHolder? holder = isSelected && hand.CurrentMode == NPlayerHand.Mode.UpgradeSelect
+                ? ((NUpgradePreview)GetFieldValue(hand, "_upgradePreview")!).DefaultFocusedControl as NCardHolder
+                : hand.GetCardHolder((CardModel)card);
+            if (holder?.CardNode?.Model != card || !holder.IsVisibleInTree())
+            {
+                return false;
+            }
+            holder.EmitSignal(NCardHolder.SignalName.Pressed, holder);
+            return true;
+        }
+
+        if (screen is NCardGridSelectionScreen gridScreen)
+        {
+            CardSelectorPrefs prefs = (CardSelectorPrefs)GetFieldValue(screen, "_prefs")!;
+            HashSet<CardModel> selected = (HashSet<CardModel>)GetFieldValue(screen, "_selectedCards")!;
+            if (!IsSelectionGridInteractive(gridScreen)
+                || (!selected.Contains((CardModel)card) && selected.Count >= prefs.MaxSelect))
+            {
+                return false;
+            }
         }
 
         string screenTypeName = screen.GetType().FullName ?? screen.GetType().Name;
@@ -1064,24 +1152,102 @@ internal static class BridgeIntrospection
         }
 
         onCardClicked.Invoke(screen, new[] { card });
-        InvokeParameterlessMethod(screen, "CheckIfSelectionComplete");
-
         return true;
+    }
+
+    public static bool TryConfirmCardSelection()
+    {
+        NConfirmButton? button = GetActiveCardSelectionScreen() switch
+        {
+            NPlayerHand hand => GetHandConfirmButton(hand),
+            NCombatPileCardSelectScreen pile => GetCombatPileConfirmButton(pile),
+            NCardGridSelectionScreen grid => GetGridConfirmButton(grid),
+            _ => null,
+        };
+        if (button is null)
+        {
+            return false;
+        }
+
+        // Use the native button callback: it resolves the pending choice and
+        // removes the overlay. Never force CheckIfSelectionComplete on a click;
+        // that bypasses manual confirmation (or completes an automatic choice twice).
+        button.ForceClick();
+        return true;
+    }
+
+    private static NConfirmButton? GetHandConfirmButton(NPlayerHand hand)
+    {
+        CardSelectorPrefs prefs = (CardSelectorPrefs)GetFieldValue(hand, "_prefs")!;
+        List<CardModel> selected = (List<CardModel>)GetFieldValue(hand, "_selectedCards")!;
+        HashSet<CardModel> candidates = GetCardSelectionItems(hand).Cast<CardModel>().ToHashSet();
+        return selected.Count >= prefs.MinSelect && selected.Count <= prefs.MaxSelect
+            && selected.All(candidates.Contains)
+            && GetFieldValue(hand, "_selectModeConfirmButton") is NConfirmButton { IsEnabled: true } button
+            && button.IsVisibleInTree() ? button : null;
+    }
+
+    private static NConfirmButton? GetCombatPileConfirmButton(NCombatPileCardSelectScreen screen)
+    {
+        return GetFieldValue(screen, "_confirmButton") is NConfirmButton { IsEnabled: true } button
+            && button.IsVisibleInTree() ? button : null;
+    }
+
+    private static bool IsSelectionGridInteractive(NCardGridSelectionScreen screen)
+    {
+        return GetFieldValue(screen, "_peekButton") is NPeekButton { IsPeeking: false }
+            && GetFieldValue(screen, "_grid") is NCardGrid grid && grid.IsVisibleInTree()
+            && grid.FocusBehaviorRecursive != Control.FocusBehaviorRecursiveEnum.Disabled;
+    }
+
+    private static NConfirmButton? GetGridConfirmButton(NCardGridSelectionScreen screen)
+    {
+        if (!screen.IsVisibleInTree()
+            || GetFieldValue(screen, "_peekButton") is not NPeekButton { IsPeeking: false })
+            return null;
+        CardSelectorPrefs prefs = (CardSelectorPrefs)GetFieldValue(screen, "_prefs")!;
+        HashSet<CardModel> selected = (HashSet<CardModel>)GetFieldValue(screen, "_selectedCards")!;
+        if (selected.Count < prefs.MinSelect || selected.Count > prefs.MaxSelect)
+            return null;
+
+        // Range selections can have both the grid's Continue button and a
+        // preview Confirm enabled. The visible preview owns input in that case.
+        foreach (string field in new[] { "_singlePreviewConfirmButton", "_multiPreviewConfirmButton", "_previewConfirmButton", "_confirmButton" })
+        {
+            if (GetFieldValue(screen, field) is NConfirmButton { IsEnabled: true } button
+                && button.IsVisibleInTree())
+                return button;
+        }
+        return null;
     }
 
     public static ChoiceContextSnapshot? BuildChoiceContext(RunState? runState)
     {
-        object? eventModel = GetEventModel(runState);
-        if (eventModel is null)
+        if (GetMutableEventModel(runState) is not EventModel eventModel
+            || eventModel.Description is not LocString source || eventModel.Owner is not Player owner)
         {
             return null;
         }
 
+        // The room can exist before NEventRoom populates its description. Use
+        // its localization inputs on a copy, never format an unstarted event's
+        // InitialDescription or mutate the live description during observation.
+        LocString description = new(source.LocTable, source.LocEntryKey);
+        description.AddVariablesFrom(source);
+        if (description.Exists())
+        {
+            owner.Character.AddDetailsTo(description);
+            description.Add("IsMultiplayer", owner.RunState.Players.Count > 1);
+            eventModel.DynamicVars.AddTo(description);
+        }
         return new ChoiceContextSnapshot
         {
             Kind = DetermineNonCombatScene(runState),
-            Title = GetLocalizedPropertyText(eventModel, "Title"),
-            Description = GetFirstLocalizedPropertyText(eventModel, "Description", "InitialDescription"),
+            Title = eventModel.Title.GetFormattedText(),
+            // Ancients can display dialogue instead of this description. Match
+            // NEventRoom: don't present a missing localization key as game text.
+            // Already-rendered dialogue remains in screen.visible_controls.
+            Description = description.Exists() ? description.GetFormattedText() : string.Empty,
         };
     }
 
@@ -1098,7 +1264,7 @@ internal static class BridgeIntrospection
         }
 
         NEventRoom? eventRoom = NEventRoom.Instance;
-        if (eventRoom is null)
+        if (eventRoom is null || !ActiveScreenContext.Instance.IsCurrent(eventRoom))
         {
             return false;
         }
@@ -1159,13 +1325,8 @@ internal static class BridgeIntrospection
 
     public static string BuildCardId(object handItem, int index)
     {
-        int? stableId = TryGetStableCardId(handItem);
-        if (stableId is int id)
-        {
-            return $"card_{id.ToString(CultureInfo.InvariantCulture)}";
-        }
-
-        return $"hand_{index.ToString(CultureInfo.InvariantCulture)}";
+        return GetCardModel(handItem) is CardModel card ? CardStateExporter.Id(card)
+            : $"hand_{index.ToString(CultureInfo.InvariantCulture)}";
     }
 
     public static bool CardMatchesId(object handItem, int index, string commandCardId)
@@ -1231,36 +1392,17 @@ internal static class BridgeIntrospection
 
     public static bool IsCardPlayable(object handItem)
     {
-        object? directPlayable = handItem.GetType().GetProperty("IsPlayable")?.GetValue(handItem);
-        if (directPlayable is bool boolValue)
-        {
-            return boolValue;
-        }
-
-        CardModel? model = GetCardModel(handItem);
-        if (model is null)
-        {
-            return false;
-        }
-
-        try
-        {
-            return model.CanPlay();
-        }
-        catch
-        {
-            object? reflectedPlayable = model.GetType().GetProperty("IsPlayable")?.GetValue(model);
-            if (reflectedPlayable is bool reflectedBoolValue)
-            {
-                return reflectedBoolValue;
-            }
-
-            return false;
-        }
+        // IsPlayable only covers the card's own logic; CanPlay also checks
+        // current energy/stars, keywords, and powers/relics that prevent play.
+        return GetCardModel(handItem)?.CanPlay() == true;
     }
 
     public static string BuildCreatureId(Creature creature, int index)
     {
+        if (creature.CombatId is uint id)
+        {
+            return $"enemy_{id.ToString(CultureInfo.InvariantCulture)}";
+        }
         if (!string.IsNullOrEmpty(creature.SlotName))
         {
             return creature.SlotName;
@@ -1321,20 +1463,20 @@ internal static class BridgeIntrospection
 
     private static IEnumerable? GetCurrentOptions(RunState? runState)
     {
-        object? eventModel = GetMutableEventModel(runState);
-        if (eventModel is null)
+        if (GetMutableEventModel(runState) is not EventModel eventModel)
         {
             return null;
         }
 
-        try
+        // Exports can run before option buttons finish _Ready. Match the
+        // game's NEventOptionButton localization setup rather than formatting
+        // descriptions with missing event variables during that interval.
+        foreach (EventOption option in eventModel.CurrentOptions)
         {
-            return eventModel.GetType().GetProperty("CurrentOptions")?.GetValue(eventModel) as IEnumerable;
+            eventModel.DynamicVars.AddTo(option.Title);
+            eventModel.DynamicVars.AddTo(option.Description);
         }
-        catch
-        {
-            return null;
-        }
+        return eventModel.CurrentOptions;
     }
 
     private static bool TryGetChoice(RunState? runState, string choiceId, out object? option, out int index)
@@ -1483,38 +1625,26 @@ internal static class BridgeIntrospection
 
     private static NRewardsScreen? GetActiveRewardsScreen()
     {
-        if (Engine.GetMainLoop() is not SceneTree tree)
-        {
-            return null;
-        }
-
-        NRewardsScreen? activeScreen = null;
-        foreach (Node node in EnumerateNodes(tree.Root))
-        {
-            if (node is NRewardsScreen rewardsScreen && IsNodeVisible(rewardsScreen) && !rewardsScreen.IsComplete)
-            {
-                activeScreen = rewardsScreen;
-            }
-        }
-
-        return activeScreen;
+        // IsComplete means rewards were claimed/skipped, not that the screen
+        // closed. Terminal reward screens still need their Proceed button.
+        return ActiveScreenContext.Instance.GetCurrentScreen() as NRewardsScreen;
     }
 
-    private static NMerchantRoom? GetActiveMerchantRoom()
+    private static Node? GetActiveMerchantRoom()
     {
-        NMerchantRoom? merchantRoom = NMerchantRoom.Instance;
-        if (merchantRoom is null || !IsNodeVisible(merchantRoom))
+        // Resolve the active native screen, not the ordinary shop singleton:
+        // event shops have a different owner and overlays must block actions.
+        return ActiveScreenContext.Instance.GetCurrentScreen() switch
         {
-            return null;
-        }
-
-        return merchantRoom;
+            NMerchantRoom room when IsNodeVisible(room) => room,
+            NFakeMerchant room when IsNodeVisible(room) => room,
+            _ => null,
+        };
     }
 
     private static NMerchantInventory? GetActiveMerchantInventory()
     {
-        NMerchantRoom? merchantRoom = GetActiveMerchantRoom();
-        NMerchantInventory? inventory = merchantRoom?.Inventory;
+        NMerchantInventory? inventory = ActiveScreenContext.Instance.GetCurrentScreen() as NMerchantInventory;
         if (inventory is null || !inventory.IsOpen || !IsNodeVisible(inventory))
         {
             return null;
@@ -1523,48 +1653,25 @@ internal static class BridgeIntrospection
         return inventory;
     }
 
+    private static bool CanUseMerchantInventory(NMerchantInventory inventory)
+    {
+        NBackButton button = inventory.GetNode<NBackButton>("%BackButton");
+        return button.IsEnabled && IsNodeVisible(button);
+    }
+
     private static NRestSiteRoom? GetActiveRestSiteRoom()
     {
-        NRestSiteRoom? room = NRestSiteRoom.Instance;
-        return room is not null && IsNodeVisible(room) ? room : null;
+        return ActiveScreenContext.Instance.GetCurrentScreen() as NRestSiteRoom;
     }
 
     private static NTreasureRoom? GetActiveTreasureRoom()
     {
-        if (Engine.GetMainLoop() is not SceneTree tree)
-        {
-            return null;
-        }
-
-        NTreasureRoom? active = null;
-        foreach (Node node in EnumerateNodes(tree.Root))
-        {
-            if (node is NTreasureRoom treasureRoom && IsNodeVisible(treasureRoom))
-            {
-                active = treasureRoom;
-            }
-        }
-
-        return active;
+        return ActiveScreenContext.Instance.GetCurrentScreen() as NTreasureRoom;
     }
 
     private static NChooseARelicSelection? GetActiveRelicSelectionScreen()
     {
-        if (Engine.GetMainLoop() is not SceneTree tree)
-        {
-            return null;
-        }
-
-        NChooseARelicSelection? active = null;
-        foreach (Node node in EnumerateNodes(tree.Root))
-        {
-            if (node is NChooseARelicSelection relicSelection && IsNodeVisible(relicSelection))
-            {
-                active = relicSelection;
-            }
-        }
-
-        return active;
+        return ActiveScreenContext.Instance.GetCurrentScreen() as NChooseARelicSelection;
     }
 
     private static List<RelicSnapshot> BuildRelicSelectionRelics(NChooseARelicSelection screen)
@@ -1595,25 +1702,35 @@ internal static class BridgeIntrospection
     private static List<RelicSnapshot> BuildTreasureRelics(NTreasureRoom room)
     {
         List<RelicSnapshot> relics = [];
-        object? collection = GetFieldValue(room, "_relicCollection");
-        if (collection is not Node collectionNode || !IsNodeVisible(collectionNode))
-        {
-            return relics;
-        }
-
         int index = 0;
-        foreach (Node node in EnumerateNodes(collectionNode))
+        foreach (NTreasureRoomRelicHolder holder in GetTreasureRelicHolders(room))
         {
-            if (node is not NTreasureRoomRelicHolder holder || holder.Relic is null)
-            {
-                continue;
-            }
-
-            relics.Add(BuildRelicSnapshot(holder.Relic, index));
+            relics.Add(BuildRelicSnapshot(holder.Relic.Model, index));
             index += 1;
         }
 
         return relics;
+    }
+
+    private static IEnumerable<NTreasureRoomRelicHolder> GetTreasureRelicHolders(NTreasureRoom room)
+    {
+        if (GetFieldValue(room, "_isRelicCollectionOpen") is not true
+            || GetFieldValue(room, "_relicCollection") is not Node collection)
+        {
+            yield break;
+        }
+
+        foreach (Node node in EnumerateNodes(collection))
+        {
+            // The scene includes unused single-/multiplayer holders whose
+            // NRelic exists but whose Model getter throws. Visibility must be
+            // checked before accessing it. Use the same candidates for actions.
+            if (node is NTreasureRoomRelicHolder holder && IsNodeVisible(holder)
+                && holder.IsEnabled && holder.MouseFilter != Control.MouseFilterEnum.Ignore)
+            {
+                yield return holder;
+            }
+        }
     }
 
     private static RelicSnapshot BuildRelicSnapshot(object relicLike, int index)
@@ -1629,7 +1746,9 @@ internal static class BridgeIntrospection
         {
             Id = BuildRelicId(title, index),
             Title = title,
-            Description = GetRawLocalizedPropertyValue(model, "Description"),
+            Description = model is RelicModel relic ? GetLocalizedText(relic.DynamicDescription)
+                : GetRawLocalizedPropertyValue(model, "Description"),
+            HoverTips = model is RelicModel relicModel ? HoverTipExporter.Build(relicModel.HoverTipsExcludingRelic) : [],
             Rarity = GetPropertyTextOrEmpty(model, "Rarity"),
         };
     }
@@ -1667,21 +1786,10 @@ internal static class BridgeIntrospection
     private static bool TryFindTreasureRelicHolder(NTreasureRoom room, string relicId, out NTreasureRoomRelicHolder? holder)
     {
         holder = null;
-        object? collection = GetFieldValue(room, "_relicCollection");
-        if (collection is not Node collectionNode)
-        {
-            return false;
-        }
-
         int index = 0;
-        foreach (Node node in EnumerateNodes(collectionNode))
+        foreach (NTreasureRoomRelicHolder relicHolder in GetTreasureRelicHolders(room))
         {
-            if (node is not NTreasureRoomRelicHolder relicHolder || relicHolder.Relic is null)
-            {
-                continue;
-            }
-
-            if (string.Equals(BuildRelicSnapshot(relicHolder.Relic, index).Id, relicId, StringComparison.Ordinal))
+            if (string.Equals(BuildRelicSnapshot(relicHolder.Relic.Model, index).Id, relicId, StringComparison.Ordinal))
             {
                 holder = relicHolder;
                 return true;
@@ -1708,7 +1816,14 @@ internal static class BridgeIntrospection
 
             string kind = GetMerchantItemKind(slot, entry);
             string title = GetMerchantItemTitle(slot, entry, kind);
-            string description = GetMerchantItemDescription(slot, entry, kind);
+            AbstractModel? model = entry switch
+            {
+                MerchantCardEntry cardEntry => cardEntry.CreationResult?.Card,
+                MerchantRelicEntry relicEntry => relicEntry.Model,
+                MerchantPotionEntry potionEntry => potionEntry.Model,
+                _ => null,
+            };
+            CardSnapshot? card = model is CardModel cardModel ? CardStateExporter.BuildCard(cardModel) : null;
             int cost = GetMerchantItemCost(entry);
             bool affordable = GetMerchantItemAffordable(entry);
             bool stocked = GetMerchantItemStocked(entry);
@@ -1718,10 +1833,24 @@ internal static class BridgeIntrospection
                 Id = BuildMerchantItemId(kind, title, cost, index),
                 Kind = kind,
                 Title = title,
-                Description = description,
+                ModelId = model?.Id.Entry,
+                Description = card?.Description ?? GetMerchantItemDescription(slot, model, kind),
+                HoverTips = model switch
+                {
+                    RelicModel relic => HoverTipExporter.Build(relic.HoverTipsExcludingRelic),
+                    PotionModel potion => HoverTipExporter.Build(potion.ExtraHoverTips),
+                    _ => card?.HoverTips ?? [],
+                },
+                BaseValues = model switch
+                {
+                    RelicModel relic => relic.DynamicVars.ToDictionary(v => v.Key, v => v.Value.BaseValue),
+                    PotionModel potion => potion.DynamicVars.ToDictionary(v => v.Key, v => v.Value.BaseValue),
+                    _ => card?.BaseValues ?? [],
+                },
+                Card = card,
                 Cost = cost,
                 Affordable = affordable,
-                Purchasable = affordable && stocked,
+                Purchasable = affordable && stocked && IsNodeVisible(slot) && CanUseMerchantInventory(inventory),
                 Rarity = GetMerchantItemRarity(entry, kind),
                 OnSale = GetMerchantItemOnSale(entry),
             });
@@ -1786,10 +1915,8 @@ internal static class BridgeIntrospection
         return $"shop_{kind}_{index.ToString(CultureInfo.InvariantCulture)}_{hash.ToString(CultureInfo.InvariantCulture)}";
     }
 
-    private static string BuildPotionId(string title, int index)
-    {
-        return BuildStableId("potion", title, index);
-    }
+    private static string BuildPotionId(PotionModel potion) => PotionIdentities.GetValue(potion,
+        _ => new PotionIdentity($"potion_{Guid.NewGuid():N}")).Id;
 
     private static string BuildRelicId(string title, int index)
     {
@@ -1901,12 +2028,12 @@ internal static class BridgeIntrospection
         return kind;
     }
 
-    private static string GetMerchantItemDescription(NMerchantSlot slot, object entry, string kind)
+    private static string GetMerchantItemDescription(NMerchantSlot slot, AbstractModel? model, string kind)
     {
         object? visual = GetMemberValue(slot, "Visual");
         if (kind == "remove_card")
         {
-            string text = GetRawLocalizedPropertyValue(visual, "Description");
+            string text = GetLocalizedPropertyValue(visual, "Description");
             if (!string.IsNullOrEmpty(text))
             {
                 return text;
@@ -1915,27 +2042,12 @@ internal static class BridgeIntrospection
             return "Remove a card from your deck.";
         }
 
-        if (kind == "card")
+        return model switch
         {
-            object? creationResult = GetMemberValue(entry, "CreationResult");
-            object? card = GetMemberValue(creationResult, "Card");
-            if (card is not null)
-            {
-                return GetCardDescription(card);
-            }
-        }
-
-        foreach (string memberName in new[] { "Model", "Potion", "Relic" })
-        {
-            object? model = GetMemberValue(entry, memberName);
-            string text = GetRawLocalizedPropertyValue(model, "Description");
-            if (!string.IsNullOrEmpty(text))
-            {
-                return text;
-            }
-        }
-
-        return string.Empty;
+            RelicModel relic => relic.DynamicDescription.GetFormattedText(),
+            PotionModel potion => potion.DynamicDescription.GetFormattedText(),
+            _ => string.Empty,
+        };
     }
 
     private static int GetMerchantItemCost(object entry)
@@ -1983,7 +2095,7 @@ internal static class BridgeIntrospection
     private static bool HasActivePostCombatProceed(RunState? runState)
     {
         NCombatRoom? combatRoom = NCombatRoom.Instance;
-        if (combatRoom is null || !IsNodeVisible(combatRoom))
+        if (combatRoom is null || !ActiveScreenContext.Instance.IsCurrent(combatRoom))
         {
             return false;
         }
@@ -2055,22 +2167,8 @@ internal static class BridgeIntrospection
 
     private static bool IsRewardProceedEnabled(NRewardsScreen rewardsScreen)
     {
-        object? proceedButton = GetFieldValue(rewardsScreen, "_proceedButton");
-        if (proceedButton is null)
-        {
-            return false;
-        }
-
-        foreach (string propertyName in new[] { "Disabled", "IsDisabled" })
-        {
-            object? value = proceedButton.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(proceedButton);
-            if (value is bool disabled)
-            {
-                return !disabled;
-            }
-        }
-
-        return GetBoolPropertyValue(proceedButton, "Visible") || GetBoolPropertyValue(proceedButton, "ButtonPressed");
+        return GetFieldValue(rewardsScreen, "_proceedButton") is NProceedButton { IsEnabled: true } button
+            && IsNodeVisible(button);
     }
 
     private static string BuildRewardId(object reward, int index)
@@ -2134,57 +2232,43 @@ internal static class BridgeIntrospection
 
     private static string GetRewardDescription(object reward)
     {
-        return GetLocalizedPropertyValue(reward, "Description");
+        return reward switch
+        {
+            PotionReward { Potion: { } potion } => GetLocalizedText(potion.DynamicDescription),
+            RelicReward { Relic: { } relic } => GetLocalizedText(relic.DynamicDescription),
+            _ => GetLocalizedPropertyValue(reward, "Description"),
+        };
     }
 
-    private static bool IsRewardSkippable(object reward)
+    private static bool IsRewardSkippable(NRewardsScreen screen) => IsRewardProceedEnabled(screen)
+        && GetFieldValue(screen, "_rewardsSet") is RewardsSet { DisallowSkipping: false }
+        && GetFieldValue(screen, "_rewardButtons") is ICollection { Count: 1 };
+
+    private static string? GetRewardUnavailableReason(NRewardButton button)
     {
-        object? canSkip = reward.GetType().GetProperty("CanSkip", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(reward);
-        if (canSkip is bool canSkipValue)
+        if (!IsRewardButtonSelectable(button))
         {
-            return canSkipValue;
+            return "reward_unavailable";
         }
-
-        return HasMethod(reward, "OnSkipped");
-    }
-
-    private static bool IsRewardButtonSelectable(NRewardButton button)
-    {
-        foreach (string propertyName in new[] { "IsDisabled", "Disabled" })
+        if (button.Reward is PotionReward { Potion: { } potion } reward)
         {
-            object? value = button.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(button);
-            if (value is bool disabled)
+            if (!Hook.ShouldProcurePotion(reward.Player.RunState, reward.Player.Creature.CombatState, potion, reward.Player))
             {
-                return !disabled;
+                return "potion_acquisition_blocked";
+            }
+            if (!reward.Player.HasOpenPotionSlots)
+            {
+                return "potion_belt_full";
             }
         }
-
-        foreach (string propertyName in new[] { "IsInteractable", "Interactable" })
-        {
-            object? value = button.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(button);
-            if (value is bool interactable)
-            {
-                return interactable;
-            }
-        }
-
-        return true;
+        return null;
     }
+
+    private static bool IsRewardButtonSelectable(NRewardButton button) => button.IsEnabled && IsNodeVisible(button);
 
     private static bool HasMethod(object source, string methodName)
     {
         return source.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public) is not null;
-    }
-
-    private static IEnumerable GetAllMapPoints(object actMap)
-    {
-        MethodInfo? getAllMapPoints = actMap.GetType().GetMethod("GetAllMapPoints", BindingFlags.Instance | BindingFlags.Public);
-        if (getAllMapPoints?.Invoke(actMap, null) is IEnumerable points)
-        {
-            return points;
-        }
-
-        return Array.Empty<object>();
     }
 
     private static HashSet<string> BuildVisitedPointIdSet(RunState? runState)
@@ -2208,31 +2292,10 @@ internal static class BridgeIntrospection
         return visited;
     }
 
-    private static HashSet<string> BuildTravelablePointIdSet(NMapScreen mapScreen)
-    {
-        HashSet<string> travelable = [];
-        foreach (Node node in EnumerateNodes(mapScreen))
-        {
-            string typeName = node.GetType().FullName ?? node.GetType().Name;
-            if (!string.Equals(typeName, "MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapPoint", StringComparison.Ordinal) &&
-                !string.Equals(typeName, "MegaCrit.Sts2.Core.Nodes.Screens.Map.NNormalMapPoint", StringComparison.Ordinal) &&
-                !string.Equals(typeName, "MegaCrit.Sts2.Core.Nodes.Screens.Map.NBossMapPoint", StringComparison.Ordinal) &&
-                !string.Equals(typeName, "MegaCrit.Sts2.Core.Nodes.Screens.Map.NAncientMapPoint", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            object? point = node.GetType().GetProperty("Point", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(node);
-            bool isTravelable = node.GetType().GetProperty("IsTravelable", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(node) is bool value && value;
-            string? pointId = BuildMapPointId(point);
-            if (isTravelable && !string.IsNullOrEmpty(pointId))
-            {
-                travelable.Add(pointId);
-            }
-        }
-
-        return travelable;
-    }
+    private static bool CanSelectMapPoint(NMapScreen mapScreen, NMapPoint point) =>
+        mapScreen.IsTravelEnabled && !mapScreen.IsTraveling
+        && mapScreen.Drawings.GetLocalDrawingMode() == DrawingMode.None
+        && point.State == MapPointState.Travelable && point.IsEnabled && point.IsVisibleInTree();
 
     private static List<string> BuildChildPointIds(object point)
     {
@@ -2297,27 +2360,6 @@ internal static class BridgeIntrospection
         return null;
     }
 
-    private static MapCoord? ParseMapCoord(string pointId)
-    {
-        string[] parts = pointId.Split('_', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length != 3 || parts[0] != "point")
-        {
-            return null;
-        }
-
-        if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int col))
-        {
-            return null;
-        }
-
-        if (!int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int row))
-        {
-            return null;
-        }
-
-        return new MapCoord(col, row);
-    }
-
     private static string BuildChoiceId(object option, int index)
     {
         string title = GetOptionTitle(option);
@@ -2346,27 +2388,28 @@ internal static class BridgeIntrospection
 
     private static string GetOptionDescription(object option)
     {
+        if (option is EventOption eventOption)
+        {
+            // Continuation choices may have no description. Preserve empty
+            // localized text instead of falling through to LocString.ToString().
+            LocString description = eventOption.Description;
+            return description.Exists() ? description.GetFormattedText() : string.Empty;
+        }
         return GetLocalizedPropertyText(option, "Description");
     }
 
+    public static bool HasPendingHandSelection => NPlayerHand.Instance?.IsInCardSelection == true;
+
     private static object? GetActiveCardSelectionScreen()
     {
-        if (Engine.GetMainLoop() is not SceneTree tree)
+        object? screen = ActiveScreenContext.Instance.GetCurrentScreen();
+        if (screen is NCombatRoom && NPlayerHand.Instance is { IsInCardSelection: true } hand
+            && hand.IsVisibleInTree() && !hand.PeekButton.IsPeeking
+            && NOverlayStack.Instance?.ScreenCount == 0)
         {
-            return null;
+            return hand;
         }
-
-        object? activeScreen = null;
-        foreach (Node node in EnumerateNodes(tree.Root))
-        {
-            string typeName = node.GetType().FullName ?? node.GetType().Name;
-            if (IsCardSelectionTypeName(typeName) && IsNodeVisible(node))
-            {
-                activeScreen = node;
-            }
-        }
-
-        return activeScreen;
+        return screen is not null && IsCardSelectionTypeName(screen.GetType().FullName!) ? screen : null;
     }
 
     private static IEnumerable<Node> EnumerateNodes(Node root)
@@ -2385,6 +2428,7 @@ internal static class BridgeIntrospection
     {
         return typeName switch
         {
+            "MegaCrit.Sts2.Core.Nodes.Screens.CardSelection.NCombatPileCardSelectScreen" => true,
             "MegaCrit.Sts2.Core.Nodes.Screens.CardSelection.NCardRewardSelectionScreen" => true,
             "MegaCrit.Sts2.Core.Nodes.Screens.CardSelection.NDeckTransformSelectScreen" => true,
             "MegaCrit.Sts2.Core.Nodes.Screens.CardSelection.NDeckCardSelectScreen" => true,
@@ -2408,6 +2452,31 @@ internal static class BridgeIntrospection
 
     private static IEnumerable GetCardSelectionItems(object screen)
     {
+        if (screen is NPlayerHand hand)
+        {
+            List<CardModel> selected = (List<CardModel>)GetFieldValue(hand, "_selectedCards")!;
+            var filter = (Func<CardModel, bool>?)GetFieldValue(hand, "_currentSelectionFilter");
+            return hand.ActiveHolders.Select(holder => holder.CardNode?.Model)
+                .OfType<CardModel>().Concat(selected).Distinct()
+                .Where(card => card.Pile?.Type == PileType.Hand && (filter?.Invoke(card) ?? true)).ToArray();
+        }
+
+        if (screen is NCombatPileCardSelectScreen)
+        {
+            // _cards stays empty on this screen. The grid tracks the native
+            // filter and live pile changes; don't offer the whole source pile.
+            NCardGrid grid = (NCardGrid)GetFieldValue(screen, "_grid")!;
+            CardPile pile = (CardPile)GetFieldValue(screen, "_pile")!;
+            IEnumerable<CardModel> cards = grid.CurrentlyDisplayedCards;
+            if (pile.Type == PileType.Draw)
+            {
+                // Duplicate cards must not disclose their relative draw order.
+                cards = cards.OrderBy(card => card.Id.Entry, StringComparer.Ordinal)
+                    .ThenBy(CardStateExporter.Id, StringComparer.Ordinal);
+            }
+            return cards.ToArray();
+        }
+
         foreach (string fieldName in new[] { "_cards", "_cardResults", "_options", "_extraOptions" })
         {
             object? cards = GetFieldValue(screen, fieldName);
@@ -2460,42 +2529,15 @@ internal static class BridgeIntrospection
             return prompt;
         }
 
-        object? options = GetFieldValue(screen, "_options");
-        if (options is IEnumerable optionEnumerable)
-        {
-            foreach (object? option in optionEnumerable)
-            {
-                if (option is null)
-                {
-                    continue;
-                }
-
-                CardModel? cardModel = GetCardModel(option);
-                if (cardModel is not null)
-                {
-                    try
-                    {
-                        object? selectionPromptValue = GetMemberValue(cardModel, "SelectionScreenPrompt");
-                        string selectionPrompt = GetLocalizedText(selectionPromptValue);
-                        if (!string.IsNullOrEmpty(selectionPrompt))
-                        {
-                            return selectionPrompt;
-                        }
-                    }
-                    catch
-                    {
-                    }
-                }
-            }
-        }
-
         string infoLabel = GetNodeText(GetFieldValue(screen, "_infoLabel"));
         if (!string.IsNullOrEmpty(infoLabel))
         {
             return infoLabel;
         }
 
-        string banner = GetNodeText(GetFieldValue(screen, "_banner"));
+        // Read this selector's banner, not an offered card's on-play prompt
+        // (e.g. Headbutt's discard recovery prompt in an ordinary card reward).
+        string banner = GetNodeText(GetMemberValue(GetFieldValue(screen, "_banner"), "label"));
         if (!string.IsNullOrEmpty(banner))
         {
             return banner;
@@ -2628,91 +2670,6 @@ internal static class BridgeIntrospection
         }
 
         return node.IsInsideTree();
-    }
-
-    private static int? TryGetStableCardId(object handItem)
-    {
-        CardModel? model = GetCardModel(handItem);
-        foreach (object candidate in EnumerateCardIdCandidates(handItem, model))
-        {
-            int? stableId = TryGetStableCardIdFromCandidate(candidate);
-            if (stableId is not null)
-            {
-                return stableId;
-            }
-        }
-
-        return null;
-    }
-
-    private static IEnumerable<object> EnumerateCardIdCandidates(object handItem, CardModel? model)
-    {
-        yield return handItem;
-
-        if (model is not null && !ReferenceEquals(model, handItem))
-        {
-            yield return model;
-        }
-
-        foreach (string propertyName in new[] { "NetCombatCard", "Card", "Model" })
-        {
-            object? value = handItem.GetType().GetProperty(propertyName)?.GetValue(handItem);
-            if (value is not null && !ReferenceEquals(value, handItem) && !ReferenceEquals(value, model))
-            {
-                yield return value;
-            }
-        }
-    }
-
-    private static int? TryGetStableCardIdFromCandidate(object candidate)
-    {
-        Type? dbType = candidate.GetType().Assembly.GetType("MegaCrit.Sts2.Core.GameActions.Multiplayer.NetCombatCardDb");
-        object? instance = dbType?.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-        if (instance is null || dbType is null)
-        {
-            return null;
-        }
-
-        MethodInfo? tryGetCardId = dbType.GetMethod("TryGetCardId", BindingFlags.Public | BindingFlags.Instance);
-        if (tryGetCardId is not null)
-        {
-            ParameterInfo[] parameters = tryGetCardId.GetParameters();
-            if (parameters.Length == 2)
-            {
-                object?[] args = { candidate, 0 };
-                try
-                {
-                    if (tryGetCardId.Invoke(instance, args) is bool found && found && args[1] is int tryId)
-                    {
-                        return tryId;
-                    }
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        MethodInfo? getCardId = dbType.GetMethod("GetCardId", BindingFlags.Public | BindingFlags.Instance);
-        if (getCardId is null)
-        {
-            return null;
-        }
-
-        try
-        {
-            object? result = getCardId.Invoke(instance, new[] { candidate });
-            if (result is int id)
-            {
-                return id;
-            }
-
-            return null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     private static string GetStringProperty(object source, string propertyName)

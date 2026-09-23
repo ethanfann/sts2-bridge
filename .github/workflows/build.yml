@@ -1,0 +1,71 @@
+name: Build bridge
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Build release files without an installed game
+        if: github.ref_type != 'tag'
+        run: python3 release.py
+      - name: Validate tag and build release files
+        if: github.ref_type == 'tag'
+        run: python3 release.py --tag "$GITHUB_REF_NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sts2-bridge
+          if-no-files-found: error
+          path: |
+            dist/release/sts2-bridge.dll
+            dist/release/sts2-bridge.json
+            dist/release/sts2-bridge-v*.zip
+            dist/release/SHA256SUMS
+            dist/release/LICENSE
+
+  draft-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sts2-bridge
+          path: release
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: true
+          fail_on_unmatched_files: true
+          body: |
+            Experimental STS2 Bridge. No AI runtime or Workshop publishing.
+
+            Build-only CI has passed; review installed-game test results before publishing.
+            Extract the ZIP into the game's mods directory, or place the DLL and
+            JSON together in mods/sts2-bridge. Do not install game/reference DLLs.
+            Remove an older FirstMod installation before loading this mod.
+          files: |
+            release/sts2-bridge.dll
+            release/sts2-bridge.json
+            release/sts2-bridge-v*.zip
+            release/SHA256SUMS
+            release/LICENSE

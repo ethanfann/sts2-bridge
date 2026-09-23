@@ -6,3 +6,4 @@ dist/
 *.pck
 0Harmony.dll
 sts2.dll
+__pycache__/

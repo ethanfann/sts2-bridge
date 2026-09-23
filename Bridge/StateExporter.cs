@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Godot;
@@ -10,12 +11,16 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.HoverTips;
+using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Runs;
 
-namespace FirstMod.Bridge;
+namespace Sts2Bridge.Bridge;
 
 internal static class StateExporter
 {
+    private static string? _publishedStateId;
+    private static string? _publishedGuardJson;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -24,7 +29,7 @@ internal static class StateExporter
 
     public static string StateFilePath => Path.Combine(StateDirectoryPath, "state.json");
 
-    internal static string StateDirectoryPath => ProjectSettings.GlobalizePath("user://first-mod-bridge");
+    internal static string StateDirectoryPath => ProjectSettings.GlobalizePath("user://sts2-bridge");
 
     public static StableBridgeSnapshot BuildStableSnapshot()
     {
@@ -34,6 +39,7 @@ internal static class StateExporter
         CombatState? combatState = BridgeIntrospection.GetCombatState(runState);
         Player? player = BridgeIntrospection.GetPrimaryPlayer(combatState, runState);
         PlayerCombatState? playerCombatState = player?.PlayerCombatState;
+        ScreenSnapshot screen = ScreenDiagnostics.Capture();
         CardSelectionContextSnapshot? cardSelection = BridgeIntrospection.BuildCardSelectionContext();
         RelicSelectionContextSnapshot? relicSelection = cardSelection is null ? BridgeIntrospection.BuildRelicSelectionContext() : null;
         MapContextSnapshot? map = BridgeIntrospection.BuildMapContext(runState);
@@ -50,12 +56,21 @@ internal static class StateExporter
         return new StableBridgeSnapshot
         {
             ProtocolVersion = 1,
-            Scene = DetermineScene(runManager, combatManager, runState, combatState, cardSelection, relicSelection, merchant, rewards, treasure, restSite, map),
-            WaitingForInput = DetermineWaitingForInput(runManager, combatManager, playerCombatState, choices.Count, cardSelection, relicSelection, merchant, rewards, treasure, restSite, proceedContext, map),
+            Screen = screen,
+            Combat = combatState is null ? null : new CombatSnapshot(
+                combatState.RoundNumber, combatState.CurrentSide.ToString(),
+                playerCombatState?.TurnNumber, playerCombatState?.Phase.ToString(),
+                combatManager?.PlayerActionsDisabled ?? true,
+                runManager?.ActionExecutor?.CurrentlyRunningAction?.GetType().Name),
+            Scene = !screen.Supported && runState is not null ? "unsupported" : DetermineScene(runManager, combatManager, runState, combatState, cardSelection, relicSelection, merchant, rewards, treasure, restSite, map),
+            WaitingForInput = screen.Supported && DetermineWaitingForInput(runManager, combatManager, playerCombatState, choices.Count, cardSelection, relicSelection, merchant, rewards, treasure, restSite, proceedContext, map),
             Run = BuildRunSnapshot(runState),
             Player = BuildPlayerSnapshot(player),
             Enemies = BuildEnemySnapshots(combatState),
-            Hand = BuildHandSnapshots(playerCombatState),
+            Hand = CardStateExporter.BuildPile(playerCombatState?.Hand),
+            Deck = CardStateExporter.BuildPile(player?.Deck),
+            Piles = CardStateExporter.BuildPiles(playerCombatState),
+            CardsPlayed = CardStateExporter.BuildPlayedCards(combatState, player),
             Potions = potions,
             CardSelection = cardSelection,
             RelicSelection = relicSelection,
@@ -81,17 +96,24 @@ internal static class StateExporter
 
     public static string BuildStateJson(StableBridgeSnapshot stableSnapshot)
     {
+        string guardJson = BuildGuardJson(stableSnapshot);
         BridgeSnapshot snapshot = new()
         {
             ProtocolVersion = stableSnapshot.ProtocolVersion,
-            StateId = $"state_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)}",
+            StateId = guardJson == _publishedGuardJson && _publishedStateId is not null
+                ? _publishedStateId : $"state_{Guid.NewGuid():N}",
             Timestamp = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
             Scene = stableSnapshot.Scene,
             WaitingForInput = stableSnapshot.WaitingForInput,
+            Screen = stableSnapshot.Screen,
+            Combat = stableSnapshot.Combat,
             Run = stableSnapshot.Run,
             Player = stableSnapshot.Player,
             Enemies = stableSnapshot.Enemies,
             Hand = stableSnapshot.Hand,
+            Deck = stableSnapshot.Deck,
+            Piles = stableSnapshot.Piles,
+            CardsPlayed = stableSnapshot.CardsPlayed,
             Potions = stableSnapshot.Potions,
             CardSelection = stableSnapshot.CardSelection,
             RelicSelection = stableSnapshot.RelicSelection,
@@ -112,14 +134,32 @@ internal static class StateExporter
         return JsonSerializer.Serialize(snapshot, JsonOptions);
     }
 
-    public static void WriteStateJson(string stateJson)
+    private static string BuildGuardJson(StableBridgeSnapshot snapshot)
+    {
+        // Combat diagnostics include floating damage text and animated labels.
+        // Gameplay context is already exported separately; those labels must
+        // not invalidate an otherwise identical card-play decision.
+        if (snapshot.Scene == "combat" && snapshot.Screen.Type == "NCombatRoom")
+        {
+            snapshot = snapshot with { Screen = snapshot.Screen with { VisibleControls = [], Truncated = false } };
+        }
+        return BuildStableStateJson(snapshot);
+    }
+
+    public static bool MatchesCurrentObservation(string stateId) =>
+        stateId == _publishedStateId
+        && _publishedGuardJson == BuildGuardJson(BuildStableSnapshot());
+
+    public static void WriteStateJson(string stateJson, StableBridgeSnapshot snapshot)
     {
         Directory.CreateDirectory(StateDirectoryPath);
 
         string tempFilePath = Path.Combine(StateDirectoryPath, "state.json.tmp");
         File.WriteAllText(tempFilePath, stateJson);
-        File.Copy(tempFilePath, StateFilePath, true);
-        File.Delete(tempFilePath);
+        File.Move(tempFilePath, StateFilePath, true);
+        using JsonDocument document = JsonDocument.Parse(stateJson);
+        _publishedStateId = document.RootElement.GetProperty("state_id").GetString();
+        _publishedGuardJson = BuildGuardJson(snapshot);
     }
 
     private static string DetermineScene(
@@ -247,7 +287,8 @@ internal static class StateExporter
             return false;
         }
 
-        if (!combatManager.IsInProgress || playerCombatState?.Phase != PlayerTurnPhase.Play || combatManager.PlayerActionsDisabled)
+        if (!combatManager.IsInProgress || playerCombatState?.Phase != PlayerTurnPhase.Play
+            || combatManager.PlayerActionsDisabled || BridgeIntrospection.HasPendingHandSelection)
         {
             return false;
         }
@@ -264,6 +305,10 @@ internal static class StateExporter
 
         return new RunSnapshot
         {
+            Seed = runState.Rng.StringSeed,
+            Ascension = runState.AscensionLevel,
+            BaseRoomType = runState.BaseRoom?.RoomType.ToString(),
+            EventId = (BridgeIntrospection.GetEventModel(runState) as MegaCrit.Sts2.Core.Models.EventModel)?.Id.Entry,
             CurrentAct = runState.CurrentActIndex + 1,
             ActFloor = runState.ActFloor,
             TotalFloor = runState.TotalFloor,
@@ -286,6 +331,8 @@ internal static class StateExporter
 
         return new PlayerSnapshot
         {
+            Character = player.Character.Id.Entry,
+            Stars = combatState?.Stars,
             Hp = creature?.CurrentHp,
             MaxHp = creature?.MaxHp,
             Block = creature?.Block,
@@ -295,7 +342,38 @@ internal static class StateExporter
             DeckCount = GetPileCount(player.Deck),
             RelicCount = CountEntries(player.Relics),
             PotionCount = CountEntries(player.Potions),
+            PotionCapacity = player.MaxPotionCount,
+            Powers = BuildPowers(creature),
+            Relics = player.Relics.Select(relic => new OwnedRelicSnapshot(
+                relic.Id.Entry, relic.Title.GetFormattedText(), relic.DynamicDescription.GetFormattedText(),
+                relic.Status.ToString(), relic.IsUsedUp, relic.ShowCounter ? relic.DisplayAmount : null,
+                relic.StackCount, relic.DynamicVars.ToDictionary(v => v.Key, v => v.Value.BaseValue),
+                HoverTipExporter.Build(relic.HoverTipsExcludingRelic))).ToList(),
         };
+    }
+
+    private static List<PowerSnapshot> BuildPowers(Creature? creature) => creature?.Powers
+        .Where(power => power.IsVisible)
+        .Select(power => new PowerSnapshot(power.Id.Entry, power.Title.GetFormattedText(), power.Amount,
+            power.TypeForCurrentAmount.ToString(), power.StackType.ToString(),
+            power.HoverTips.OfType<HoverTip>().Select(tip => tip.Description).ToList())).ToList() ?? [];
+
+    private static List<IntentSnapshot> BuildIntents(Creature enemy, CombatState combat)
+    {
+        // Only the currently announced intents. Never inspect the move state
+        // machine's future branches or turn a Hidden/Unknown intent into an attack.
+        if (enemy.Monster is null || !enemy.IsAlive)
+        {
+            return [];
+        }
+        Creature[] targets = combat.Players.Select(player => player.Creature).ToArray();
+        return enemy.Monster.NextMove.Intents.Select(intent =>
+        {
+            AttackIntent? attack = intent as AttackIntent;
+            HoverTip? tip = intent.HasIntentTip ? intent.GetHoverTip(targets, enemy) : null;
+            return new IntentSnapshot(intent.IntentType.ToString(), tip?.Title, tip?.Description,
+                attack?.GetSingleDamage(targets, enemy), attack?.Repeats, attack?.GetTotalDamage(targets, enemy));
+        }).ToList();
     }
 
     private static List<EnemySnapshot> BuildEnemySnapshots(CombatState? combatState)
@@ -317,43 +395,14 @@ internal static class StateExporter
                 MaxHp = enemy.MaxHp,
                 Block = enemy.Block,
                 IsHittable = enemy.IsHittable,
+                ModelId = enemy.Monster?.Id.Entry,
+                Powers = BuildPowers(enemy),
+                Intents = BuildIntents(enemy, combatState),
             });
             index += 1;
         }
 
         return enemies;
-    }
-
-    private static List<CardSnapshot> BuildHandSnapshots(PlayerCombatState? combatState)
-    {
-        List<CardSnapshot> cards = [];
-        if (combatState?.Hand is null)
-        {
-            return cards;
-        }
-
-        int index = 0;
-        foreach (object? card in combatState.Hand.Cards)
-        {
-            if (card is null)
-            {
-                index += 1;
-                continue;
-            }
-
-            cards.Add(new CardSnapshot
-            {
-                Id = BridgeIntrospection.BuildCardId(card, index),
-                Name = BridgeIntrospection.GetCardName(card),
-                Description = BridgeIntrospection.GetCardDescription(card),
-                Cost = BridgeIntrospection.GetCardCostText(card),
-                Rarity = BridgeIntrospection.GetCardRarity(card),
-                Playable = BridgeIntrospection.IsCardPlayable(card),
-            });
-            index += 1;
-        }
-
-        return cards;
     }
 
     private static int GetPileCount(CardPile? pile)
@@ -428,6 +477,12 @@ internal sealed record StableBridgeSnapshot
     [property: JsonPropertyName("waiting_for_input")]
     public required bool WaitingForInput { get; init; }
 
+    [property: JsonPropertyName("screen")]
+    public required ScreenSnapshot Screen { get; init; }
+
+    [property: JsonPropertyName("combat")]
+    public required CombatSnapshot? Combat { get; init; }
+
     [property: JsonPropertyName("run")]
     public required RunSnapshot? Run { get; init; }
 
@@ -439,6 +494,15 @@ internal sealed record StableBridgeSnapshot
 
     [property: JsonPropertyName("hand")]
     public required List<CardSnapshot> Hand { get; init; }
+
+    [property: JsonPropertyName("deck")]
+    public required List<CardSnapshot> Deck { get; init; }
+
+    [property: JsonPropertyName("piles")]
+    public required CardPilesSnapshot? Piles { get; init; }
+
+    [property: JsonPropertyName("cards_played")]
+    public required List<CardPlaySnapshot> CardsPlayed { get; init; }
 
     [property: JsonPropertyName("potions")]
     public required List<PotionSnapshot> Potions { get; init; }
@@ -491,6 +555,9 @@ internal sealed record BridgeSnapshot
     [property: JsonPropertyName("protocol_version")]
     public required int ProtocolVersion { get; init; }
 
+    [property: JsonPropertyName("command_guards")]
+    public string[] CommandGuards { get; init; } = ["expected_state_id"];
+
     [property: JsonPropertyName("state_id")]
     public required string StateId { get; init; }
 
@@ -503,6 +570,12 @@ internal sealed record BridgeSnapshot
     [property: JsonPropertyName("waiting_for_input")]
     public required bool WaitingForInput { get; init; }
 
+    [property: JsonPropertyName("screen")]
+    public required ScreenSnapshot Screen { get; init; }
+
+    [property: JsonPropertyName("combat")]
+    public required CombatSnapshot? Combat { get; init; }
+
     [property: JsonPropertyName("run")]
     public required RunSnapshot? Run { get; init; }
 
@@ -514,6 +587,15 @@ internal sealed record BridgeSnapshot
 
     [property: JsonPropertyName("hand")]
     public required List<CardSnapshot> Hand { get; init; }
+
+    [property: JsonPropertyName("deck")]
+    public required List<CardSnapshot> Deck { get; init; }
+
+    [property: JsonPropertyName("piles")]
+    public required CardPilesSnapshot? Piles { get; init; }
+
+    [property: JsonPropertyName("cards_played")]
+    public required List<CardPlaySnapshot> CardsPlayed { get; init; }
 
     [property: JsonPropertyName("potions")]
     public required List<PotionSnapshot> Potions { get; init; }
@@ -561,8 +643,28 @@ internal sealed record BridgeSnapshot
     public required int PlayPileCount { get; init; }
 }
 
+internal sealed record CombatSnapshot(
+    [property: JsonPropertyName("round")] int Round,
+    [property: JsonPropertyName("side")] string Side,
+    [property: JsonPropertyName("player_turn")] int? PlayerTurn,
+    [property: JsonPropertyName("player_phase")] string? PlayerPhase,
+    [property: JsonPropertyName("actions_disabled")] bool ActionsDisabled,
+    [property: JsonPropertyName("running_action")] string? RunningAction);
+
 internal sealed record RunSnapshot
 {
+    [property: JsonPropertyName("seed")]
+    public required string Seed { get; init; }
+
+    [property: JsonPropertyName("ascension")]
+    public required int Ascension { get; init; }
+
+    [property: JsonPropertyName("base_room_type")]
+    public required string? BaseRoomType { get; init; }
+
+    [property: JsonPropertyName("event_id")]
+    public required string? EventId { get; init; }
+
     [property: JsonPropertyName("current_act")]
     public required int CurrentAct { get; init; }
 
@@ -581,6 +683,12 @@ internal sealed record RunSnapshot
 
 internal sealed record PlayerSnapshot
 {
+    [property: JsonPropertyName("character")]
+    public required string Character { get; init; }
+
+    [property: JsonPropertyName("stars")]
+    public required int? Stars { get; init; }
+
     [property: JsonPropertyName("hp")]
     public required int? Hp { get; init; }
 
@@ -607,7 +715,43 @@ internal sealed record PlayerSnapshot
 
     [property: JsonPropertyName("potion_count")]
     public required int PotionCount { get; init; }
+
+    [property: JsonPropertyName("potion_capacity")]
+    public required int PotionCapacity { get; init; }
+
+    [property: JsonPropertyName("powers")]
+    public required List<PowerSnapshot> Powers { get; init; }
+
+    [property: JsonPropertyName("relics")]
+    public required List<OwnedRelicSnapshot> Relics { get; init; }
 }
+
+internal sealed record PowerSnapshot(
+    [property: JsonPropertyName("model_id")] string ModelId,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("amount")] int Amount,
+    [property: JsonPropertyName("type")] string Type,
+    [property: JsonPropertyName("stack_type")] string StackType,
+    [property: JsonPropertyName("descriptions")] List<string> Descriptions);
+
+internal sealed record OwnedRelicSnapshot(
+    [property: JsonPropertyName("model_id")] string ModelId,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("description")] string Description,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("used_up")] bool UsedUp,
+    [property: JsonPropertyName("counter")] int? Counter,
+    [property: JsonPropertyName("stack_count")] int StackCount,
+    [property: JsonPropertyName("base_values")] Dictionary<string, decimal> BaseValues,
+    [property: JsonPropertyName("hover_tips")] List<HoverTipSnapshot> HoverTips);
+
+internal sealed record IntentSnapshot(
+    [property: JsonPropertyName("type")] string Type,
+    [property: JsonPropertyName("title")] string? Title,
+    [property: JsonPropertyName("description")] string? Description,
+    [property: JsonPropertyName("damage_per_hit")] int? DamagePerHit,
+    [property: JsonPropertyName("hits")] int? Hits,
+    [property: JsonPropertyName("total_damage")] int? TotalDamage);
 
 internal sealed record EnemySnapshot
 {
@@ -628,6 +772,15 @@ internal sealed record EnemySnapshot
 
     [property: JsonPropertyName("is_hittable")]
     public required bool IsHittable { get; init; }
+
+    [property: JsonPropertyName("model_id")]
+    public required string? ModelId { get; init; }
+
+    [property: JsonPropertyName("powers")]
+    public required List<PowerSnapshot> Powers { get; init; }
+
+    [property: JsonPropertyName("intents")]
+    public required List<IntentSnapshot> Intents { get; init; }
 }
 
 internal sealed record CardSnapshot
@@ -641,6 +794,9 @@ internal sealed record CardSnapshot
     [property: JsonPropertyName("description")]
     public required string Description { get; init; }
 
+    [property: JsonPropertyName("hover_tips")]
+    public required List<HoverTipSnapshot> HoverTips { get; init; }
+
     [property: JsonPropertyName("cost")]
     public required string Cost { get; init; }
 
@@ -649,18 +805,84 @@ internal sealed record CardSnapshot
 
     [property: JsonPropertyName("playable")]
     public required bool Playable { get; init; }
+
+    [property: JsonPropertyName("model_id")]
+    public required string ModelId { get; init; }
+
+    [property: JsonPropertyName("deck_card_id")]
+    public string? DeckCardId { get; init; }
+
+    [property: JsonPropertyName("type")]
+    public required string Type { get; init; }
+
+    [property: JsonPropertyName("target_type")]
+    public required string TargetType { get; init; }
+
+    [property: JsonPropertyName("energy_cost")]
+    public required int EnergyCost { get; init; }
+
+    [property: JsonPropertyName("costs_x")]
+    public required bool CostsX { get; init; }
+
+    [property: JsonPropertyName("star_cost")]
+    public required int StarCost { get; init; }
+
+    [property: JsonPropertyName("costs_stars_x")]
+    public required bool CostsStarsX { get; init; }
+
+    [property: JsonPropertyName("upgrade_level")]
+    public required int UpgradeLevel { get; init; }
+
+    [property: JsonPropertyName("keywords")]
+    public required List<string> Keywords { get; init; }
+
+    [property: JsonPropertyName("retain_this_turn")]
+    public required bool RetainThisTurn { get; init; }
+
+    [property: JsonPropertyName("exhaust_on_next_play")]
+    public required bool ExhaustOnNextPlay { get; init; }
+
+    [property: JsonPropertyName("enchantment")]
+    public string? Enchantment { get; init; }
+
+    [property: JsonPropertyName("affliction")]
+    public string? Affliction { get; init; }
+
+    [property: JsonPropertyName("base_values")]
+    public required Dictionary<string, decimal> BaseValues { get; init; }
+
+    [property: JsonPropertyName("play_targets")]
+    public required List<CardTargetPreview> PlayTargets { get; init; }
+
+    [property: JsonPropertyName("upgrade_preview")]
+    public CardUpgradePreviewSnapshot? UpgradePreview { get; init; }
 }
 
 internal sealed record PotionSnapshot
 {
     [property: JsonPropertyName("id")]
-    public required string Id { get; init; }
+    public required string? Id { get; init; }
+
+    [property: JsonPropertyName("model_id")]
+    public required string ModelId { get; init; }
+
+    [property: JsonPropertyName("slot_index")]
+    public int? SlotIndex { get; init; }
+
+    [property: JsonPropertyName("discard_available")]
+    public required bool DiscardAvailable { get; init; }
+
+    [property: JsonPropertyName("base_values")]
+    public required Dictionary<string, decimal> BaseValues { get; init; }
 
     [property: JsonPropertyName("title")]
     public required string Title { get; init; }
 
     [property: JsonPropertyName("description")]
     public required string Description { get; init; }
+
+    [property: JsonPropertyName("hover_tips")]
+    public required List<HoverTipSnapshot> HoverTips { get; init; }
 
     [property: JsonPropertyName("rarity")]
     public required string Rarity { get; init; }
@@ -682,6 +904,12 @@ internal sealed record ChoiceSnapshot
 
     [property: JsonPropertyName("description")]
     public required string Description { get; init; }
+
+    [property: JsonPropertyName("hover_tips")]
+    public required List<HoverTipSnapshot> HoverTips { get; init; }
+
+    [property: JsonPropertyName("relic_model_id")]
+    public string? RelicModelId { get; init; }
 
     [property: JsonPropertyName("locked")]
     public required bool Locked { get; init; }
@@ -719,6 +947,15 @@ internal sealed record CardSelectionContextSnapshot
     [property: JsonPropertyName("kind")]
     public required string Kind { get; init; }
 
+    [property: JsonPropertyName("source_pile")]
+    public string? SourcePile { get; init; }
+
+    [property: JsonPropertyName("selected_card_ids")]
+    public List<string>? SelectedCardIds { get; init; }
+
+    [property: JsonPropertyName("confirm_available")]
+    public bool? ConfirmAvailable { get; init; }
+
     [property: JsonPropertyName("prompt")]
     public required string Prompt { get; init; }
 
@@ -734,9 +971,19 @@ internal sealed record CardSelectionContextSnapshot
     [property: JsonPropertyName("cancelable")]
     public required bool Cancelable { get; init; }
 
+    [property: JsonPropertyName("alternatives")]
+    public List<CardRewardAlternativeSnapshot>? Alternatives { get; init; }
+
     [property: JsonPropertyName("cards")]
     public required List<CardSnapshot> Cards { get; init; }
 }
+
+internal sealed record CardRewardAlternativeSnapshot(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("after_selected")] string AfterSelected,
+    [property: JsonPropertyName("selectable")] bool Selectable);
 
 internal sealed record RelicSelectionContextSnapshot
 {
@@ -763,6 +1010,9 @@ internal sealed record RelicSnapshot
 
     [property: JsonPropertyName("description")]
     public required string Description { get; init; }
+
+    [property: JsonPropertyName("hover_tips")]
+    public required List<HoverTipSnapshot> HoverTips { get; init; }
 
     [property: JsonPropertyName("rarity")]
     public required string Rarity { get; init; }
@@ -821,8 +1071,20 @@ internal sealed record MerchantItemSnapshot
     [property: JsonPropertyName("title")]
     public required string Title { get; init; }
 
+    [property: JsonPropertyName("model_id")]
+    public required string? ModelId { get; init; }
+
     [property: JsonPropertyName("description")]
     public required string Description { get; init; }
+
+    [property: JsonPropertyName("hover_tips")]
+    public required List<HoverTipSnapshot> HoverTips { get; init; }
+
+    [property: JsonPropertyName("base_values")]
+    public required Dictionary<string, decimal> BaseValues { get; init; }
+
+    [property: JsonPropertyName("card")]
+    public CardSnapshot? Card { get; init; }
 
     [property: JsonPropertyName("cost")]
     public required int Cost { get; init; }
@@ -874,6 +1136,24 @@ internal sealed record RewardSnapshot
 
     [property: JsonPropertyName("description")]
     public required string Description { get; init; }
+
+    [property: JsonPropertyName("potion")]
+    public PotionSnapshot? Potion { get; init; }
+
+    [property: JsonPropertyName("model_id")]
+    public string? ModelId { get; init; }
+
+    [property: JsonPropertyName("rarity")]
+    public string? Rarity { get; init; }
+
+    [property: JsonPropertyName("base_values")]
+    public Dictionary<string, decimal>? BaseValues { get; init; }
+
+    [property: JsonPropertyName("hover_tips")]
+    public List<HoverTipSnapshot>? HoverTips { get; init; }
+
+    [property: JsonPropertyName("unavailable_reason")]
+    public string? UnavailableReason { get; init; }
 
     [property: JsonPropertyName("skippable")]
     public required bool Skippable { get; init; }

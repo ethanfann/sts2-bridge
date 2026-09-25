@@ -92,7 +92,7 @@ case "$ACTION" in
     mkdir -p "$FIXTURE_DIR"
     install -m 644 "$PROJECT_DIR/.godot/fixture-build/bin/BridgeFixtures/release/BridgeFixtures.dll" "$FIXTURE_DIR/BridgeFixtures.dll"
     install -m 644 "$PROJECT_DIR/tests/Fixtures/BridgeFixtures.json" "$FIXTURE_DIR/BridgeFixtures.json"
-    cases=(neow-mechanics morphic-loner wellspring-bottle wellspring-bathe crystal-sphere battleworn-dummy round-tea-party architect-dialogue deck-upgrade deck-selection shop-rest-context fake-merchant-buy fake-merchant-skip treasure-take treasure-skip treasure-empty map-normal map-boss)
+    cases=(neow-mechanics morphic-loner wellspring-bottle wellspring-bathe crystal-sphere crystal-sphere-gold battleworn-dummy round-tea-party architect-dialogue deck-upgrade deck-selection shop-rest-context fake-merchant-buy fake-merchant-skip treasure-take treasure-skip treasure-empty map-normal map-boss)
     if [[ "$ACTION" == combat ]]; then
       cases=(combat-context combat-pile-selection combat-hand-selection potion-rewards card-rewards)
     fi

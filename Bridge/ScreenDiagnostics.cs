@@ -16,7 +16,7 @@ internal static class ScreenDiagnostics
         or "NRewardsScreen" or "NChooseARelicSelection" or "NCardRewardSelectionScreen"
         or "NDeckTransformSelectScreen" or "NDeckCardSelectScreen" or "NChooseACardSelectionScreen"
         or "NSimpleCardSelectScreen" or "NDeckUpgradeSelectScreen" or "NDeckEnchantSelectScreen"
-        or "NCombatPileCardSelectScreen";
+        or "NCombatPileCardSelectScreen" or "NCrystalSphereScreen";
 
     public static ScreenSnapshot Capture()
     {

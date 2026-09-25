@@ -31,6 +31,8 @@ ACTIONS = {
     "select_rest_site_option": (("option_id",), ()),
     "use_potion": (("potion_id",), ("target_id",)),
     "discard_potion": (("potion_id",), ()),
+    "select_crystal_sphere_tool": (("tool_id",), ()),
+    "reveal_crystal_sphere_cell": (("cell_id",), ()),
     "mark": (("note",), ()),
 }
 

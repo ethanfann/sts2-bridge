@@ -15,6 +15,7 @@ from treasure_case import exercise_treasure
 from map_case import exercise_map
 from potion_reward_case import exercise_potion_rewards
 from card_reward_case import exercise_card_rewards
+from crystal_sphere_case import exercise_crystal_sphere
 
 CASE_EVENTS = {
     "neow-mechanics": "NEOW",
@@ -22,6 +23,7 @@ CASE_EVENTS = {
     "wellspring-bottle": "WELLSPRING",
     "wellspring-bathe": "WELLSPRING",
     "crystal-sphere": "CRYSTAL_SPHERE",
+    "crystal-sphere-gold": "CRYSTAL_SPHERE",
     "battleworn-dummy": "BATTLEWORN_DUMMY",
     "round-tea-party": "ROUND_TEA_PARTY",
     "architect-dialogue": "THE_ARCHITECT",
@@ -84,6 +86,9 @@ def exercise_event(process, sandbox, path, case, output):
     if case in ("map-normal", "map-boss"):
         exercise_map(process, sandbox, path, case, output)
         return
+    if case in ("crystal-sphere", "crystal-sphere-gold"):
+        exercise_crystal_sphere(process, sandbox, path, case, output)
+        return
     event_id = CASE_EVENTS[case]
     neow_relics = {"SCROLL_BOXES", "NEOWS_TORMENT", "SILKEN_TRESS"}
     initial = wait_state(process, path, "initial event choices", lambda s:
@@ -116,7 +121,7 @@ def exercise_event(process, sandbox, path, case, output):
         # Results/epoch dismissal remains outside the bridge's supported scope.
         return
 
-    choice_index = 1 if case in ("morphic-loner", "wellspring-bathe", "crystal-sphere", "round-tea-party") else 0
+    choice_index = 1 if case in ("morphic-loner", "wellspring-bathe", "round-tea-party") else 0
     choice = initial["choices"][choice_index]
     if case == "neow-mechanics":
         offers = {c["relic_model_id"]: c for c in initial["choices"]}
@@ -151,19 +156,6 @@ def exercise_event(process, sandbox, path, case, output):
         assert choice["title"] == "Pick a Fight"
         assert "11" in choice["description"] and "Relic" in choice["description"]
     send_command(process, bridge, "select_choice", choice_id=choice["id"])
-
-    if case == "crystal-sphere":
-        state = wait_state(process, path, "custom minigame", lambda s:
-                           s["screen"]["type"] == "NCrystalSphereScreen")
-        assert state["scene"] == "unsupported" and state["screen"]["supported"] is False
-        assert state["waiting_for_input"] is False and not state["choices"]
-        assert not state.get("proceed_context") and state["screen"]["visible_controls"]
-        result = send_command(process, bridge, "proceed", expected_status="error")
-        assert "Unsupported active screen 'NCrystalSphereScreen'" in result["message"]
-        send_command(process, bridge, "mark", note="Unsupported minigame still allows playtest notes")
-        # Preserve this gap for the reliability pass, rather than bypassing it.
-        (output / "unsupported-screen.json").write_text(json.dumps(state, indent=2))
-        return
 
     if case == "round-tea-party":
         state = wait_state(process, path, "Tea Party Continue choice", lambda s:

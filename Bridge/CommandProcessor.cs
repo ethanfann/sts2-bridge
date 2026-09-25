@@ -136,6 +136,8 @@ internal static class CommandProcessor
                 "select_card_reward_alternative" => ExecuteSelectCardRewardAlternative(command),
                 "confirm_card_selection" => ExecuteConfirmCardSelection(command),
                 "select_choice" => ExecuteSelectChoice(command),
+                "select_crystal_sphere_tool" => ExecuteCrystalSphere(command, selectTool: true),
+                "reveal_crystal_sphere_cell" => ExecuteCrystalSphere(command, selectTool: false),
                 "use_potion" => ExecuteUsePotion(command),
                 "discard_potion" => ExecuteDiscardPotion(command),
                 _ => Error(command.CommandId, $"Unsupported command type '{command.Type}'."),
@@ -356,6 +358,18 @@ internal static class CommandProcessor
         return Success(command.CommandId, "Card selection confirmed.");
     }
 
+    private static CommandResult ExecuteCrystalSphere(BridgeCommand command, bool selectTool)
+    {
+        string? id = selectTool ? command.ToolId : command.CellId;
+        if (string.IsNullOrEmpty(id))
+            return Error(command.CommandId, $"{command.Type} requires {(selectTool ? "tool_id" : "cell_id")}.");
+        bool accepted = selectTool ? CrystalSphereAdapter.TrySelectTool(id) : CrystalSphereAdapter.TryRevealCell(id);
+        if (!accepted)
+            return Error(command.CommandId, $"Crystal Sphere {(selectTool ? "tool" : "cell")} '{id}' is not available.");
+        BridgeRuntime.RequestExport();
+        return Success(command.CommandId, $"Crystal Sphere {(selectTool ? "tool selected" : "reveal started")}.");
+    }
+
     private static CommandResult ExecuteProceed(BridgeCommand command)
     {
         RunManager? runManager = RunManager.Instance;
@@ -365,7 +379,7 @@ internal static class CommandProcessor
             return Error(command.CommandId, "Run context unavailable.");
         }
 
-        if (!BridgeIntrospection.TryProceed(runState))
+        if (!CrystalSphereAdapter.TryProceed() && !BridgeIntrospection.TryProceed(runState))
         {
             return Error(command.CommandId, "Proceed is not available.");
         }
@@ -666,6 +680,12 @@ internal sealed record BridgeCommand
 
     [property: JsonPropertyName("potion_id")]
     public string? PotionId { get; init; }
+
+    [property: JsonPropertyName("tool_id")]
+    public string? ToolId { get; init; }
+
+    [property: JsonPropertyName("cell_id")]
+    public string? CellId { get; init; }
 }
 
 internal sealed record CommandResult

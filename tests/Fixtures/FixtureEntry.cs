@@ -123,6 +123,12 @@ public static class FixtureEntry
                 game.GetTree().Quit();
                 return;
             }
+            if (eventId == "CRYSTAL_SPHERE")
+            {
+                await CrystalSphereFixture.Run(game, manager, state, player);
+                game.GetTree().Quit();
+                return;
+            }
             if (eventId is "TREASURE_CONTEXT" or "TREASURE_EMPTY")
             {
                 await TreasureFixture.Run(game, manager, player, empty: eventId == "TREASURE_EMPTY");

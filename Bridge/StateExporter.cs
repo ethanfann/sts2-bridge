@@ -40,6 +40,7 @@ internal static class StateExporter
         Player? player = BridgeIntrospection.GetPrimaryPlayer(combatState, runState);
         PlayerCombatState? playerCombatState = player?.PlayerCombatState;
         ScreenSnapshot screen = ScreenDiagnostics.Capture();
+        CrystalSphereContextSnapshot? crystalSphere = CrystalSphereAdapter.Capture();
         CardSelectionContextSnapshot? cardSelection = BridgeIntrospection.BuildCardSelectionContext();
         RelicSelectionContextSnapshot? relicSelection = cardSelection is null ? BridgeIntrospection.BuildRelicSelectionContext() : null;
         MapContextSnapshot? map = BridgeIntrospection.BuildMapContext(runState);
@@ -47,10 +48,12 @@ internal static class StateExporter
         RewardContextSnapshot? rewards = cardSelection is null && relicSelection is null && map is null ? BridgeIntrospection.BuildRewardContext() : null;
         TreasureContextSnapshot? treasure = cardSelection is null && relicSelection is null && merchant is null && rewards is null && map is null ? BridgeIntrospection.BuildTreasureContext() : null;
         RestSiteContextSnapshot? restSite = cardSelection is null && relicSelection is null && merchant is null && rewards is null && treasure is null && map is null ? BridgeIntrospection.BuildRestSiteContext(runState) : null;
-        bool shouldExportEventChoices = cardSelection is null && relicSelection is null && merchant is null && rewards is null && treasure is null && restSite is null && map is null;
+        bool shouldExportEventChoices = crystalSphere is null && cardSelection is null && relicSelection is null && merchant is null && rewards is null && treasure is null && restSite is null && map is null;
         List<ChoiceSnapshot> choices = shouldExportEventChoices ? BridgeIntrospection.BuildChoiceSnapshots(runState) : [];
         ChoiceContextSnapshot? choiceContext = shouldExportEventChoices ? BridgeIntrospection.BuildChoiceContext(runState) : null;
-        ProceedContextSnapshot? proceedContext = BridgeIntrospection.BuildProceedContext(runState, choices.Count, cardSelection);
+        ProceedContextSnapshot? proceedContext = crystalSphere is not null
+            ? crystalSphere.ProceedAvailable ? new ProceedContextSnapshot { Kind = "crystal_sphere", Label = "Proceed" } : null
+            : BridgeIntrospection.BuildProceedContext(runState, choices.Count, cardSelection);
         List<PotionSnapshot> potions = BridgeIntrospection.BuildPotionSnapshots(player);
 
         return new StableBridgeSnapshot
@@ -62,8 +65,8 @@ internal static class StateExporter
                 playerCombatState?.TurnNumber, playerCombatState?.Phase.ToString(),
                 combatManager?.PlayerActionsDisabled ?? true,
                 runManager?.ActionExecutor?.CurrentlyRunningAction?.GetType().Name),
-            Scene = !screen.Supported && runState is not null ? "unsupported" : DetermineScene(runManager, combatManager, runState, combatState, cardSelection, relicSelection, merchant, rewards, treasure, restSite, map),
-            WaitingForInput = screen.Supported && DetermineWaitingForInput(runManager, combatManager, playerCombatState, choices.Count, cardSelection, relicSelection, merchant, rewards, treasure, restSite, proceedContext, map),
+            Scene = !screen.Supported && runState is not null ? "unsupported" : DetermineScene(runManager, combatManager, runState, combatState, cardSelection, relicSelection, merchant, rewards, treasure, restSite, map, crystalSphere),
+            WaitingForInput = screen.Supported && DetermineWaitingForInput(runManager, combatManager, playerCombatState, choices.Count, cardSelection, relicSelection, merchant, rewards, treasure, restSite, proceedContext, map, crystalSphere),
             Run = BuildRunSnapshot(runState),
             Player = BuildPlayerSnapshot(player),
             Enemies = BuildEnemySnapshots(combatState),
@@ -79,6 +82,7 @@ internal static class StateExporter
             Treasure = treasure,
             RestSite = restSite,
             Map = map,
+            CrystalSphere = crystalSphere,
             ChoiceContext = choiceContext,
             ProceedContext = proceedContext,
             Choices = choices,
@@ -122,6 +126,7 @@ internal static class StateExporter
             Treasure = stableSnapshot.Treasure,
             RestSite = stableSnapshot.RestSite,
             Map = stableSnapshot.Map,
+            CrystalSphere = stableSnapshot.CrystalSphere,
             ChoiceContext = stableSnapshot.ChoiceContext,
             ProceedContext = stableSnapshot.ProceedContext,
             Choices = stableSnapshot.Choices,
@@ -173,8 +178,14 @@ internal static class StateExporter
         RewardContextSnapshot? rewards,
         TreasureContextSnapshot? treasure,
         RestSiteContextSnapshot? restSite,
-        MapContextSnapshot? map)
+        MapContextSnapshot? map,
+        CrystalSphereContextSnapshot? crystalSphere)
     {
+        if (crystalSphere is not null)
+        {
+            return "crystal_sphere";
+        }
+
         if (cardSelection is not null)
         {
             return "card_selection";
@@ -235,8 +246,14 @@ internal static class StateExporter
         TreasureContextSnapshot? treasure,
         RestSiteContextSnapshot? restSite,
         ProceedContextSnapshot? proceedContext,
-        MapContextSnapshot? map)
+        MapContextSnapshot? map,
+        CrystalSphereContextSnapshot? crystalSphere)
     {
+        if (crystalSphere is not null)
+        {
+            return crystalSphere.ProceedAvailable || crystalSphere.Cells.Any(cell => cell.Selectable);
+        }
+
         if (cardSelection is not null)
         {
             return true;
@@ -528,6 +545,9 @@ internal sealed record StableBridgeSnapshot
     [property: JsonPropertyName("map")]
     public required MapContextSnapshot? Map { get; init; }
 
+    [property: JsonPropertyName("crystal_sphere")]
+    public required CrystalSphereContextSnapshot? CrystalSphere { get; init; }
+
     [property: JsonPropertyName("choice_context")]
     public required ChoiceContextSnapshot? ChoiceContext { get; init; }
 
@@ -620,6 +640,9 @@ internal sealed record BridgeSnapshot
 
     [property: JsonPropertyName("map")]
     public required MapContextSnapshot? Map { get; init; }
+
+    [property: JsonPropertyName("crystal_sphere")]
+    public required CrystalSphereContextSnapshot? CrystalSphere { get; init; }
 
     [property: JsonPropertyName("choice_context")]
     public required ChoiceContextSnapshot? ChoiceContext { get; init; }

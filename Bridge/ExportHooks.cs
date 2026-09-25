@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Combat.History;
@@ -15,6 +16,7 @@ using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Events.Custom;
+using MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
 using MegaCrit.Sts2.Core.Nodes.RestSite;
@@ -82,6 +84,37 @@ internal static class ExportHooks
         {
             BridgeRuntime.RequestExport();
         }
+    }
+
+    [HarmonyPatch(typeof(NCrystalSphereScreen), "OnCellClicked")]
+    private static class CrystalSphereClickPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(NCrystalSphereScreen __instance, Task __result) =>
+            CrystalSphereAdapter.TrackClick(__instance, __result);
+    }
+
+    [HarmonyPatch(typeof(NCrystalSphereScreen), "OnProceedButtonPressed")]
+    private static class CrystalSphereProceedPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(NCrystalSphereScreen __instance) => CrystalSphereAdapter.TrackProceed(__instance);
+    }
+
+    [HarmonyPatch]
+    private static class CrystalSphereContextPatch
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            yield return AccessTools.Method(typeof(NCrystalSphereScreen), "SetBigDivination");
+            yield return AccessTools.Method(typeof(NCrystalSphereScreen), "SetSmallDivination");
+            yield return AccessTools.Method(typeof(NCrystalSphereScreen), "OnMinigameFinished");
+            yield return AccessTools.Method(typeof(NCrystalSphereScreen), "AfterOverlayShown");
+            yield return AccessTools.Method(typeof(NCrystalSphereScreen), "AfterOverlayHidden");
+        }
+
+        [HarmonyPostfix]
+        private static void Postfix() => QueueExport();
     }
 
     [HarmonyPatch]

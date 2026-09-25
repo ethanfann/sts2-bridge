@@ -18,6 +18,7 @@ class ReleaseTests(unittest.TestCase):
         self.manifest = {"id": "sts2-bridge", "pck_name": "sts2-bridge",
                          "version": "0.1.0", "has_dll": True, "has_pck": False}
         (self.root / "LICENSE").write_text("MIT license fixture")
+        (self.root / "codex.py").write_text("# Standalone manual uploader fixture\n")
         (self.root / "mod_manifest.json").write_text(json.dumps(self.manifest))
         (self.root / "sts2-bridge.csproj").write_text(
             "<Project><PropertyGroup><Version>0.1.0</Version></PropertyGroup></Project>")
@@ -44,7 +45,8 @@ class ReleaseTests(unittest.TestCase):
         output = self.root / "release"
         release.package(self.root, build / "sts2-bridge.dll", output, "0.1.0")
         self.assertEqual({p.name for p in output.iterdir()}, {
-            "sts2-bridge.dll", "sts2-bridge.json", "sts2-bridge-v0.1.0.zip", "SHA256SUMS", "LICENSE"})
+            "sts2-bridge.dll", "sts2-bridge.json", "sts2-bridge-v0.1.0.zip", "SHA256SUMS", "LICENSE", "codex.py"})
+        self.assertEqual((output / "codex.py").read_text(), "# Standalone manual uploader fixture\n")
         with zipfile.ZipFile(output / "sts2-bridge-v0.1.0.zip") as bundle:
             self.assertEqual(set(bundle.namelist()), {
                 "sts2-bridge/sts2-bridge.dll", "sts2-bridge/sts2-bridge.json", "sts2-bridge/LICENSE"})
@@ -53,7 +55,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(json.loads(bundle.read("sts2-bridge/sts2-bridge.json")), self.manifest)
         sums = {name: digest for digest, name in (
             line.split() for line in (output / "SHA256SUMS").read_text().splitlines())}
-        self.assertEqual(set(sums), {"sts2-bridge.dll", "sts2-bridge.json", "sts2-bridge-v0.1.0.zip", "LICENSE"})
+        self.assertEqual(set(sums), {"sts2-bridge.dll", "sts2-bridge.json", "sts2-bridge-v0.1.0.zip", "LICENSE", "codex.py"})
         for name, digest in sums.items():
             self.assertEqual(digest, hashlib.sha256((output / name).read_bytes()).hexdigest())
 

@@ -1,6 +1,6 @@
 # sts2-bridge
 
-**Experimental v0.1.0.** A file-based Slay the Spire 2 state/action bridge for
+**Experimental v0.1.1.** A file-based Slay the Spire 2 state/action bridge for
 external controllers. Exports structured observations and accepts semantic game
 commands. Includes a Python CLI and an installable agent skill.
 
@@ -10,9 +10,9 @@ victory screen and unlocked Ascension 2; its chosen event branches needed no
 manual workarounds.
 
 Combat, card/potion choices, rewards, shops, treasure, rest sites, maps, and many
-events are supported. Custom screens such as Crystal Sphere still need a human;
-menus, victory/loss results, epochs, and run start/resume remain human-assisted
-by design. Multiplayer and native Windows/macOS gameplay are unverified.
+events, including Crystal Sphere, are supported. Other unsupported custom screens,
+menus, victory/loss results, epochs, and run start/resume remain human-assisted.
+Multiplayer and native Windows/macOS gameplay are unverified.
 The protocol and game hooks may change.
 
 ## Install the mod
@@ -218,6 +218,8 @@ Timeouts leave pending commands intact and include the command ID for diagnosis.
 | `select_rest_site_option` | `option_id` |
 | `use_potion` | `potion_id`, optional `target_id` |
 | `discard_potion` | `potion_id` |
+| `select_crystal_sphere_tool` | `tool_id` |
+| `reveal_crystal_sphere_cell` | `cell_id` |
 | `mark` | `note` (recording annotation; no gameplay action) |
 
 Try `python3 recording.py mark "controller connected"` for a harmless live command.
@@ -297,6 +299,34 @@ For a full belt, the agent can choose either path:
 Discard is supported on ordinary room/map/reward/shop screens and during idle
 player combat input. It rejects stale IDs, queued/locked potions, dead/game-over
 players, and covered card selectors. `use_potion` remains combat-only.
+
+## Crystal Sphere
+
+Choose the event's payment through ordinary `select_choice`. On
+`scene: crystal_sphere`, the `crystal_sphere` context exports the 11×11 grid,
+remaining divinations, selected tool, `busy`, `proceed_available`, and:
+
+- `tools`: opaque `id`, native `kind` (`Small` or `Big`), label, selected state,
+  and `selectable`. Use `select_crystal_sphere_tool --tool-id '<id>'`.
+- `cells`: opaque `id`, zero-based `x`/`y`, `hidden`, and `selectable`. Use
+  `reveal_crystal_sphere_cell --cell-id '<id>'`. Small clears one cell; Big
+  clears a clipped 3×3 area. Either spends one divination through native input.
+- `revealed_items`: only fully uncovered items after their reveal animation,
+  with kind, bounds, and displayed rarity or gold size where applicable. Covered
+  and partially uncovered identities/locations are never exported. **Partial
+  artwork is not classified or included as an image**, so this interface does
+  not yet provide all visual clues available to a human.
+
+Commands reject invalid/cleared cells, stale guarded observations, disabled
+controls, pending reveals, exhausted divinations, and covered/inactive screens.
+Wait for a fresh input-ready observation between reveals. Costs, curses, reward
+generation, and acquisition remain native game effects; reads do not roll rewards.
+
+After the last divination, handle the normal rewards screen. Returning from
+rewards exposes a **second Proceed on Crystal Sphere**: send `proceed` when
+`proceed_context.kind: crystal_sphere` appears to return to the map.
+The offline `crystal-sphere` and `crystal-sphere-gold` cases exercise both payment
+branches, partial/full reveals, guards, reward collection, and final exit.
 
 ## Opened card-reward alternatives and relic previews
 
@@ -514,6 +544,70 @@ documented above. Recordings stay local and persist across launches. Remove
 session folders manually when no longer needed. If recording storage fails,
 gameplay continues, the game log reports the failure, and `mark` returns an error.
 
+## Public run uploads to Spire Codex
+
+`codex.py` is an optional, dependency-free **Linux / Python 3.8+** uploader,
+available as a separate download on the release page or in this checkout.
+**Uploads are manual only:** no timer, watcher, background service, or game hook.
+Finishing a run never triggers an upload. Run the script explicitly to post the
+game's original completed `.run` JSON to
+[Spire Codex](https://spire-codex.com/leaderboards/submit), not bridge recordings.
+It never changes saves or controls gameplay. No API key is required; uploads
+carry your SteamID64 and can link to your account when you sign in on the site.
+**Run pages are public and uploads may count toward leaderboards/community stats.**
+The current API has no supported AI-run label or analytics opt-out.
+
+Choose exactly one history directory. On native Linux, modded profiles normally
+use `~/.local/share/SlayTheSpire2/steam/<SteamID64>/modded/profile1/saves/history`;
+vanilla profiles omit `modded/`. Wins, losses, and nonempty abandoned runs can be
+uploaded. The folder can include both human- and AI-played runs; use a dedicated
+profile if you need controller separation.
+
+Initialize once, replacing the example placeholders with your own values:
+
+```sh
+python3 codex.py --state-dir ~/.local/state/sts2-codex init \
+  --history-dir '/absolute/path/to/profile/saves/history' --steam-id '<SteamID64>'
+```
+
+Initialization sends nothing and **excludes every existing `.run` file from batch
+sync**. To upload one chosen run, old or new, preview it and then submit explicitly:
+
+```sh
+python3 codex.py --state-dir ~/.local/state/sts2-codex upload '/absolute/path/to/history/123.run' --dry-run
+python3 codex.py --state-dir ~/.local/state/sts2-codex upload '/absolute/path/to/history/123.run' \
+  --note 'AI-controlled; human resolved an unsupported event' --thread '<controller thread URL>'
+python3 codex.py --state-dir ~/.local/state/sts2-codex status
+```
+
+Notes and thread URLs remain **local only**, alongside the public run URL and
+source-file checksum in `state.json`. Use `upload --note ... --thread ...` again
+to annotate an already-uploaded run without another POST. The script does not
+infer the model, thread, or human interventions; annotate those explicitly.
+Do not delete or reset the ledger: it remembers exclusions and acknowledgements.
+Previously published runs are not reassigned by changing local configuration.
+
+For an optional **manually invoked batch**, preview the eligible files first:
+
+```sh
+python3 codex.py --state-dir ~/.local/state/sts2-codex sync --dry-run
+python3 codex.py --state-dir ~/.local/state/sts2-codex sync
+```
+
+`sync` scans the selected folder **once and exits**; it does not watch for new
+runs or schedule another invocation. It only accepts settled JSON and skips
+excluded or acknowledged files. Network errors, 429s, and 5xx responses become
+eligible for a later **manual invocation**, respecting persisted exponential
+backoff and `Retry-After`. Nothing retries in the background. Other HTTP failures
+or invalid native records remain `rejected` for review; an explicit `upload`
+retries them. Partial JSON remains eligible on a later invocation. The server
+deduplicates ambiguous submissions. `--dry-run` sends nothing and does not change
+the ledger. Exit code 1 means an error or a waiting/deferred upload; 2 is CLI misuse.
+
+Without `--state-dir`, the CLI uses `$XDG_STATE_HOME/sts2-codex` or
+`~/.local/state/sts2-codex`. The uploader is standalone; do not put it in the
+game's `mods` directory or configure automatic execution.
+
 ## Build from source
 
 **Requirements:** .NET 9 SDK and the installed game.
@@ -542,9 +636,9 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 Game tests use disposable offline save data. Logs and recordings are retained in
 `dist/smoke/run-*/`.
 
-`python3 release.py --tag v0.1.0` builds against
+`python3 release.py --tag v0.1.1` builds against
 [Book.StS2.RefLib 0.107.1](https://www.nuget.org/packages/Book.StS2.RefLib/0.107.1)
-and writes the DLL, manifest, ZIP, license, and checksums to `dist/release/`.
+and writes the DLL, manifest, ZIP, standalone uploader, license, and checksums to `dist/release/`.
 Reference assemblies are compile-only and excluded from the package.
 
 ## License

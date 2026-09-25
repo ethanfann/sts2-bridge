@@ -39,6 +39,7 @@ jobs:
             dist/release/sts2-bridge-v*.zip
             dist/release/SHA256SUMS
             dist/release/LICENSE
+            dist/release/codex.py
 
   draft-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -69,3 +70,4 @@ jobs:
             release/sts2-bridge-v*.zip
             release/SHA256SUMS
             release/LICENSE
+            release/codex.py

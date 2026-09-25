@@ -4,7 +4,7 @@
   "name": "STS2 Bridge (Experimental)",
   "author": "Ethan Fann",
   "description": "Experimental structured state and action bridge for AI controllers. Demonstrated in supervised three-act Ironclad A0 and A1 clears; incomplete screen coverage. No AI runtime included.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "min_game_version": "0.107.1",
   "has_pck": false,
   "has_dll": true,

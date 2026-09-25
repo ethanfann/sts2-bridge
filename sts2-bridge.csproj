@@ -4,7 +4,7 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <Nullable>enable</Nullable>
     <RootNamespace>Sts2Bridge</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <GameDataDir Condition="'$(GameDataDir)' == '' and '$(OS)' != 'Windows_NT'">$(HOME)/.local/share/Steam/steamapps/common/Slay the Spire 2/data_sts2_linuxbsd_x86_64</GameDataDir>
     <GameDataDir Condition="'$(GameDataDir)' == ''">$(MSBuildProgramFiles32)/Steam/steamapps/common/Slay the Spire 2/data_sts2_windows_x86_64</GameDataDir>
   </PropertyGroup>

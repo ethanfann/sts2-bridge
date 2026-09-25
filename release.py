@@ -33,9 +33,11 @@ def package(root, built_dll, output, version):
     dll = output / "sts2-bridge.dll"
     manifest = output / "sts2-bridge.json"
     license_file = output / "LICENSE"
+    uploader = output / "codex.py"
     shutil.copyfile(built_dll, dll)
     shutil.copyfile(root / "mod_manifest.json", manifest)
     shutil.copyfile(root / "LICENSE", license_file)
+    shutil.copyfile(root / "codex.py", uploader)
     archive = output / f"sts2-bridge-v{version}.zip"
     # Allowlist individual files, never the build directory. It may contain
     # game references, test fixtures, PDBs, or unrelated/stale assemblies.
@@ -44,7 +46,7 @@ def package(root, built_dll, output, version):
             bundle.write(path, f"sts2-bridge/{path.name}")
     (output / "SHA256SUMS").write_text("".join(
         f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
-        for path in (dll, manifest, license_file, archive)), encoding="utf-8")
+        for path in (dll, manifest, license_file, archive, uploader)), encoding="utf-8")
 
 
 def build_release(root, tag=None):

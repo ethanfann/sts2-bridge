@@ -1,10 +1,10 @@
 # Milestones and swappable rulesets
 
-Recorded 2026-09-21; updated 2026-09-23. **Phase 0 achieved and exceeded:**
+Recorded 2026-09-21; updated 2026-09-25. **Phase 0 achieved and exceeded:**
 the shared CLI has completed an Ironclad A1 clear through all three acts on
 native Linux v0.107.1, reaching victory and unlocking A2. Every chosen event
 branch worked without a manual workaround.
-**Current work: experimental v0.1.0 bridge release preparation.**
+**Current release: experimental v0.1.1 with Crystal Sphere and manual run uploads.**
 
 This is a staged plan, not a request to implement every layer now. It supersedes
 the milestone ordering in the earlier [architecture proposal](sts2-monorepo-architecture.md).
@@ -26,12 +26,35 @@ capabilities below must not be mistaken for features that already exist.
 - These previews are not a simulator. After-play triggers and hypothetical
   sequences require separate verification. Observed state IDs and completed-play
   hooks do not prove every asynchronous effect has settled.
-- Repeatable unattended full-run reliability is not established. Some custom event
-  screens, including Crystal Sphere, still require human input. Recordings are
-  diagnostic evidence, not complete deterministic replays.
+- Repeatable unattended full-run reliability is not established. Menus,
+  run start/results, and unsupported custom screens still require human input.
+  Crystal Sphere now has semantic controls, with the visual-clue limitation below.
+  Recordings are diagnostic evidence, not complete deterministic replays.
 - Jev, swappable runtime rulesets, capability scoring, tier catalogs, retrieval,
   and simulation are not implemented. STS2MCP remains a separate comparison,
   not a migration requirement.
+
+### Implemented bridge fix — Crystal Sphere
+
+The 2026-09-23 Ironclad A10 run on v0.107.1 required manual completion of
+`NCrystalSphereScreen` in Act 2. Ethan completed the minigame and returned control
+at its supported rewards screen. That gap led to the v0.1.1 adapter;
+[investigation and proposed approach](https://ampcode.com/threads/T-01a0cfa3-00c4-743d-af15-2fa552cbf20a).
+
+- Exports stable tool/cell IDs, grid coordinates, remaining divinations, input
+  eligibility, and fully uncovered items after their reveal animation.
+- Selects tools and reveals cells through native callbacks, preserving payments,
+  rewards, busy-state gating, stale-state guards, and active-screen precedence.
+  Handles both the rewards screen and the minigame's final Proceed back to the map.
+- Offline fixtures cover both payment branches, partial/full reveals, invalid and
+  repeated actions, exhausted divinations, covering overlays, and hidden-information
+  isolation. They use disposable saves, not the live A10 run.
+- **Remaining limitation:** partial artwork is not classified or exported as an
+  image. The agent therefore lacks some visual clues a human can use. Covered and
+  partially uncovered item identities and locations must remain private.
+
+`codex.py` also supports optional **manually invoked** Spire Codex uploads. It
+does not watch run history, install a timer, or upload when a run ends.
 
 ## Phases add capabilities; rulesets choose how to play
 

@@ -350,6 +350,15 @@ internal static class StateExporter
         {
             Character = player.Character.Id.Entry,
             Stars = combatState?.Stars,
+            OrbSlots = combatState?.OrbQueue.Capacity,
+            Orbs = combatState?.OrbQueue.Orbs.Select(orb => new OrbSnapshot(
+                orb.Id.Entry, orb.Title.GetFormattedText(), orb.PassiveVal, orb.EvokeVal,
+                HoverTipExporter.Build(orb.HoverTips))).ToList(),
+            // Pets drops Osty on death; Allies retains him for revival. Export
+            // that visible dead state too, without treating pets as enemy targets.
+            Pets = creature?.CombatState?.Allies.Where(ally => ally.PetOwner == player)
+                .Select(pet => new PetSnapshot(pet.Monster!.Id.Entry, pet.Name,
+                    pet.CurrentHp, pet.MaxHp, pet.Block, pet.IsAlive, BuildPowers(pet))).ToList() ?? [],
             Hp = creature?.CurrentHp,
             MaxHp = creature?.MaxHp,
             Block = creature?.Block,
@@ -712,6 +721,15 @@ internal sealed record PlayerSnapshot
     [property: JsonPropertyName("stars")]
     public required int? Stars { get; init; }
 
+    [property: JsonPropertyName("orb_slots")]
+    public required int? OrbSlots { get; init; }
+
+    [property: JsonPropertyName("orbs")]
+    public required List<OrbSnapshot>? Orbs { get; init; }
+
+    [property: JsonPropertyName("pets")]
+    public required List<PetSnapshot> Pets { get; init; }
+
     [property: JsonPropertyName("hp")]
     public required int? Hp { get; init; }
 
@@ -748,6 +766,22 @@ internal sealed record PlayerSnapshot
     [property: JsonPropertyName("relics")]
     public required List<OwnedRelicSnapshot> Relics { get; init; }
 }
+
+internal sealed record OrbSnapshot(
+    [property: JsonPropertyName("model_id")] string ModelId,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("passive")] decimal Passive,
+    [property: JsonPropertyName("evoke")] decimal Evoke,
+    [property: JsonPropertyName("hover_tips")] List<HoverTipSnapshot> HoverTips);
+
+internal sealed record PetSnapshot(
+    [property: JsonPropertyName("model_id")] string ModelId,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("hp")] int Hp,
+    [property: JsonPropertyName("max_hp")] int MaxHp,
+    [property: JsonPropertyName("block")] int Block,
+    [property: JsonPropertyName("is_alive")] bool IsAlive,
+    [property: JsonPropertyName("powers")] List<PowerSnapshot> Powers);
 
 internal sealed record PowerSnapshot(
     [property: JsonPropertyName("model_id")] string ModelId,

@@ -8,20 +8,21 @@ ACTION=build
 
 usage() {
   cat <<'EOF'
-Usage: ./build-and-deploy.sh [build|install|smoke|events|combat] [--game-dir PATH]
+Usage: ./build-and-deploy.sh [build|install|smoke|events|combat|characters] [--game-dir PATH]
 
   build    Build a DLL-only package in dist/local (default; does not install).
   install  Install the existing dist/local package into the game's mods folder.
   smoke    Test the existing package in a disposable, offline sandbox.
   events   Test events, upgrades, shop/rest, treasure, and map travel offline.
   combat   Test combat context, relic triggers, and pile/hand selectors offline.
+  characters  Test Regent stars/Forge, Necrobinder Osty, and Defect orbs offline.
 
 Requires a .NET 9 SDK for build/fixtures, Python 3 and bubblewrap for tests.
 Use --game-dir for a non-default Steam library. On Windows use the .ps1 script.
 EOF
 }
 
-if [[ ${1:-} == build || ${1:-} == install || ${1:-} == smoke || ${1:-} == events || ${1:-} == combat ]]; then
+if [[ ${1:-} == build || ${1:-} == install || ${1:-} == smoke || ${1:-} == events || ${1:-} == combat || ${1:-} == characters ]]; then
   ACTION="$1"
   shift
 fi
@@ -82,7 +83,7 @@ case "$ACTION" in
     require_file "$DIST_DIR/sts2-bridge.json"
     exec python3 "$PROJECT_DIR/tests/smoke.py" --game-dir "$GAME_DIR" --package-dir "$DIST_DIR"
     ;;
-  events|combat)
+  events|combat|characters)
     require_file "$DIST_DIR/sts2-bridge.dll"
     require_file "$DIST_DIR/sts2-bridge.json"
     dotnet build "$PROJECT_DIR/tests/Fixtures/BridgeFixtures.csproj" --configuration Release \
@@ -95,6 +96,8 @@ case "$ACTION" in
     cases=(neow-mechanics morphic-loner wellspring-bottle wellspring-bathe crystal-sphere crystal-sphere-gold battleworn-dummy round-tea-party architect-dialogue deck-upgrade deck-selection shop-rest-context fake-merchant-buy fake-merchant-skip treasure-take treasure-skip treasure-empty map-normal map-boss)
     if [[ "$ACTION" == combat ]]; then
       cases=(combat-context combat-pile-selection combat-hand-selection potion-rewards card-rewards)
+    elif [[ "$ACTION" == characters ]]; then
+      cases=(character-regent character-necrobinder character-defect)
     fi
     for event_case in "${cases[@]}"; do
       python3 "$PROJECT_DIR/tests/smoke.py" --game-dir "$GAME_DIR" --package-dir "$DIST_DIR" \

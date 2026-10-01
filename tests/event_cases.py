@@ -16,6 +16,7 @@ from map_case import exercise_map
 from potion_reward_case import exercise_potion_rewards
 from card_reward_case import exercise_card_rewards
 from crystal_sphere_case import exercise_crystal_sphere
+from character_case import exercise_character
 
 CASE_EVENTS = {
     "neow-mechanics": "NEOW",
@@ -30,6 +31,9 @@ CASE_EVENTS = {
     "combat-context": "COMBAT_CONTEXT",
     "combat-pile-selection": "COMBAT_PILE_SELECTION",
     "combat-hand-selection": "COMBAT_HAND_SELECTION",
+    "character-regent": "CHARACTER_REGENT",
+    "character-necrobinder": "CHARACTER_NECROBINDER",
+    "character-defect": "CHARACTER_DEFECT",
     "potion-rewards": "POTION_REWARDS",
     "card-rewards": "CARD_REWARDS",
     "deck-upgrade": "DECK_UPGRADE",
@@ -53,6 +57,9 @@ def exercise_event(process, sandbox, path, case, output):
         return read_json(sandbox / "fixture-ready.json")
 
     wait_for(process, "fixture initialization", ready, timeout=60)
+    if case.startswith("character-"):
+        exercise_character(process, sandbox, path, case, output)
+        return
     if case == "combat-context":
         exercise_combat(process, sandbox, path, output)
         return

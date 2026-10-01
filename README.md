@@ -1,6 +1,6 @@
 # sts2-bridge
 
-**Experimental v0.1.1.** A file-based Slay the Spire 2 state/action bridge for
+**Experimental v0.1.2.** A file-based Slay the Spire 2 state/action bridge for
 external controllers. Exports structured observations and accepts semantic game
 commands. Includes a Python CLI and an installable agent skill.
 
@@ -251,6 +251,17 @@ Snapshots include:
   `relics`: descriptions, base variables, displayed counters, status and used-up
   flags. Counters are UI values and can temporarily show an activation animation;
   they are not arbitrary private relic state or generic trigger predictions.
+- Character resources: `player.stars` and card star costs/spending cover Regent;
+  Forge updates the generated Sovereign Blade's ordinary card values.
+  `player.pets` exposes owned companions such as Osty with HP/max HP, block,
+  alive/dead state, and visible powers, including dead Osty before revival.
+  Pets are observations, not additional command targets.
+- `player.orb_slots` is total capacity; `player.orbs` lists occupied slots in
+  native evoke order (front first), with model/name, current `passive`/`evoke`
+  values, and formatted hover tips. Values come from the game, including Focus,
+  stored Dark damage, and Plasma's Focus exception. Focus itself is in player
+  `powers`. Use these in combat; the game can retain cleared combat state on
+  rewards/maps. Orb fields are omitted when the player has no combat state.
 - Enemy `intents`: announced type and description, plus game-calculated damage
   per hit, hit count and total for attacks. Damage is before absorbing block, not
   predicted HP loss. Hidden/non-attack intents have no invented damage value.
@@ -631,12 +642,18 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 ./build-and-deploy.sh smoke
 ./build-and-deploy.sh events
 ./build-and-deploy.sh combat
+./build-and-deploy.sh characters
 ```
 
 Game tests use disposable offline save data. Logs and recordings are retained in
-`dist/smoke/run-*/`.
+`dist/smoke/run-*/`. Build the current package before running them; tests do not
+install it. `characters` runs real-DLL, headless integration tests for Regent
+stars/Forge, Necrobinder summon/attack/damage absorption/death/revival, and Defect
+orb order/overflow/evoke/slots/Focus/Dark/Plasma. It also checks nonmutating reads,
+character-state command guards, and reset between combats. These focused fixtures
+are not full-run validation or exhaustive coverage of every card/relic interaction.
 
-`python3 release.py --tag v0.1.1` builds against
+`python3 release.py --tag v0.1.2` builds against
 [Book.StS2.RefLib 0.107.1](https://www.nuget.org/packages/Book.StS2.RefLib/0.107.1)
 and writes the DLL, manifest, ZIP, standalone uploader, license, and checksums to `dist/release/`.
 Reference assemblies are compile-only and excluded from the package.

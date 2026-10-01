@@ -57,7 +57,13 @@ public static class FixtureEntry
                 {
                     id = e.Id.Entry, model = e.GetType().Name, deterministic = e.IsDeterministic,
                 })));
-            CharacterModel character = ModelDb.Character<Ironclad>();
+            CharacterModel character = eventId switch
+            {
+                "CHARACTER_REGENT" => ModelDb.Character<Regent>(),
+                "CHARACTER_NECROBINDER" => ModelDb.Character<Necrobinder>(),
+                "CHARACTER_DEFECT" => ModelDb.Character<Defect>(),
+                _ => ModelDb.Character<Ironclad>(),
+            };
             Player player = Player.CreateForNewRun(character, SaveManager.Instance.GenerateUnlockStateFromProgress(), 1);
             RunState state = RunState.CreateForNewRun([player],
                 ActModel.GetDefaultList().Select(a => a.ToMutable()).ToList(), [], GameMode.Standard, 0, "BRIDGEFIXTURE");
@@ -69,6 +75,12 @@ public static class FixtureEntry
             await manager.SetActInternal(0);
             manager.RunLocationTargetedBuffer.OnLocationChanged(state.RunLocation);
             manager.MapSelectionSynchronizer.OnLocationChanged(state.MapLocation);
+            if (eventId.StartsWith("CHARACTER_", StringComparison.Ordinal))
+            {
+                await CharacterFixture.Run(game, manager, player, eventId);
+                game.GetTree().Quit();
+                return;
+            }
             if (eventId == "COMBAT_CONTEXT")
             {
                 await CombatFixture.Run(game, manager, state, player);

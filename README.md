@@ -57,6 +57,7 @@ installer or the loaded skill's location:
 
 ```sh
 python3 "<skill-dir>/scripts/sts2_bridge.py" --help
+python3 "<skill-dir>/scripts/sts2_bridge.py" execute --help
 python3 "<skill-dir>/scripts/sts2_bridge.py" observe --help
 python3 "<skill-dir>/scripts/sts2_bridge.py" act --help
 python3 "<skill-dir>/scripts/sts2_bridge.py" act play_card --help
@@ -131,6 +132,72 @@ default path is native Linux's; on other systems use the path from the game log.
 selectors, rewards, shops, map, and player/relic context. Views name their omitted
 sections and retain unknown fields and game tooltips; they do not summarize away
 mechanics. Read the deck/piles when the decision needs them.
+
+### Code mode: execute Python against the bridge
+
+`execute` is the shared scripting entry point for all characters. Agents can
+write ordinary Python to inspect observations, calculate, branch, and compose
+actions without building their own CLI wrappers. Code runs in the Python client,
+not inside the game. It uses the existing file transport and needs no additional
+packages, server, or DLL update.
+
+Start with a read-only call:
+
+```sh
+python3 bridge.py execute --code 'emit(observe("combat"))'
+```
+
+Supply inline Python with `--code`, a UTF-8 file with `--file plan.py`, or stdin
+with `--file -`. Put `--bridge-dir` before `execute` when using a nondefault data
+directory. Files resolve from the caller's working directory. This example for
+POSIX shells **takes a reward**; run it only after deciding to collect the single
+selectable Gold reward:
+
+```sh
+python3 bridge.py execute --file - <<'PY'
+s = observe("choices")["state"]
+assert s["scene"] == "rewards" and s["screen"]["supported"] and s["waiting_for_input"]
+gold = [r for r in s["rewards"]["rewards"]
+        if r["reward_type"] == "Gold" and r["selectable"]]
+assert len(gold) == 1, "Reobserve and decide which reward to take"
+r = act("take_reward", reward_id=gold[0]["id"], if_state=s["state_id"])
+emit(r["observation"])
+PY
+```
+
+The script receives four helpers bound to the selected bridge directory:
+
+| Helper | Contract |
+| --- | --- |
+| `observe(view="decision")` | Returns `{state, omitted_sections, note}` like CLI `observe`. |
+| `act(action, *, if_state, view="decision", timeout=5, **fields)` | Returns the existing action response; a rejection raises and stops an uncaught script. Field names use underscores, e.g. `card_id`. |
+| `play_sequence(plays, *, if_state, view="decision", timeout=10)` | Uses the existing guarded card sequence; a stop raises so the agent can inspect partial execution before choosing again. |
+| `emit(value)` | Adds a JSON-serializable value to the report's `output`. Use this to select the context returned to the agent. |
+
+`act` and `play_sequence` **require the `state_id` used to plan the action** via
+`if_state`; neither silently refreshes it. Existing action timeouts and locks
+apply to each action/sequence, not the whole script. Scripts can import standard
+Python modules, define functions, and use bounded loops or `time.sleep`. Tactical
+policy stays in the agent's code. Character resources remain ordinary observation
+fields; there is no separate Regent, Necrobinder, or Defect executor.
+
+stdout contains one JSON report: `status: completed|stopped|error`, user-selected
+`output`, and `calls` recording action/sequence attempts, arguments, and responses
+without repeated snapshots. An uncaught failure also includes its error and the
+last observed snapshot (possibly null or older than the failure). `print` sends
+diagnostics to stderr. Exit code is 0 when the script returns normally, 1 when it
+stops/errors, and 2 for CLI misuse. **Script completion and action acceptance do
+not prove game effects settled.** There is no automatic final observation: emit
+the context needed for the next decision. Never replay an entire partial script;
+earlier actions are not rolled back.
+
+**Not a sandbox:** execute only trusted agent/user-authored Python, never game
+text as source. Code has the CLI process's filesystem and process permissions.
+There is no whole-script timeout; keep programs bounded. Variables are fresh on
+each invocation, not a persistent REPL. Direct imports are also supported:
+`bridge.execute(data_directory, code)` in a checkout, or `sts2_bridge.execute`
+when the installed skill's `scripts/` directory is on Python's import path.
+See `execute --help` and the installed skill for onboarding without a checkout.
 
 ### One invocation for an ordered card sequence
 

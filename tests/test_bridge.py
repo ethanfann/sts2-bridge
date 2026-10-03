@@ -200,6 +200,166 @@ class BridgeTests(unittest.TestCase):
                 bridge.play_sequence(self.directory, self.plays, if_state="s0", timeout=timeout)
         self.assertFalse((self.directory / "command.json").exists())
 
+    def test_execute_composes_python_without_commands_or_persistent_variables(self):
+        result = bridge.execute(self.directory, """
+import math
+factor = 3
+def inspect():
+    s = observe('full')['state']
+    return {'ids': [c['id'] for c in s['hand']],
+            'score': math.prod([factor, 7]), 'unknown': s['future_mechanic']}
+value = inspect()
+emit(value)
+value['ids'].clear()
+""")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["output"], [{"ids": ["a", "b"], "score": 21,
+                                           "unknown": {"important": True}}])
+        self.assertEqual(result["calls"], [])
+        self.assertNotIn("observation", result, "Successful scripts choose their own output")
+        self.assertEqual(bridge.execute(self.directory, "emit('factor' in globals())")["output"], [False])
+        self.assertEqual(bridge.read_state(self.directory), self.state)
+        self.assertFalse((self.directory / "command.json").exists())
+        self.assertFalse((self.directory / "client.lock").exists())
+
+    def test_execute_guarded_actions_record_results_and_preserve_partial_work(self):
+        def send(directory, kind, timeout, **fields):
+            self.assertEqual(fields["expected_state_id"], self.state["state_id"])
+            self.assertTrue((directory / "client.lock").exists())
+            self.resolve(fields["card_id"])
+            return {"status": "ok", "command_id": "accepted-a"}
+
+        with patch("bridge._send_command", side_effect=send) as sender:
+            result = bridge.execute(self.directory, """
+s = observe('combat')['state']
+r = act('play_card', card_id='a', target_id='e1', if_state=s['state_id'])
+emit(r['observation']['state']['state_id'])
+r['result']['status'] = 'overwritten'
+r['observation']['state']['hand'].clear()
+raise ValueError('plan needs revising')
+act('end_turn', if_state='s0x')
+""")
+        sender.assert_called_once()
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "ValueError: plan needs revising")
+        self.assertEqual(result["output"], ["s0x"])
+        call = result["calls"][0]
+        self.assertEqual(call["arguments"], {"action": "play_card", "card_id": "a",
+                                             "target_id": "e1", "if_state": "s0"})
+        self.assertEqual(call["response"]["result"], {"status": "ok", "command_id": "accepted-a"})
+        self.assertIsNone(call["response"]["effects_settled"])
+        self.assertNotIn("observation", call["response"])
+        self.assertEqual([c["id"] for c in result["observation"]["state"]["hand"]], ["b"])
+        self.assertEqual([c["id"] for c in bridge.read_state(self.directory)["hand"]], ["b"])
+        self.assertFalse((self.directory / "client.lock").exists())
+
+    def test_execute_never_refreshes_a_stale_planning_guard_or_continues_after_rejection(self):
+        old = copy.deepcopy(self.state)
+        self.state["state_id"] = "s1"
+        self.save()
+        with patch("bridge.read_state", side_effect=[old, self.state]), patch(
+                "bridge._send_command", return_value={"status": "error", "message": "stale"}) as sender:
+            result = bridge.execute(self.directory, """
+s = observe()['state']
+act('end_turn', if_state=s['state_id'])
+act('end_turn', if_state='s1')
+""")
+        sender.assert_called_once_with(self.directory, "end_turn", 5.0, expected_state_id="s0")
+        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(result["calls"][0]["response"]["result"]["message"], "stale")
+        self.assertEqual(result["observation"]["state"]["state_id"], "s1")
+
+    def test_execute_requires_guards_and_serializable_arguments_before_sending(self):
+        codes = ["act('end_turn')", "play_sequence([])",
+                 "act('mark', if_state='s0', note=object())"]
+        for guard in (None, "", 0, []):
+            codes.extend([f"act('end_turn', if_state={guard!r})",
+                          f"play_sequence([], if_state={guard!r})"])
+        with patch("bridge._send_command") as sender:
+            for code in codes:
+                with self.subTest(code=code):
+                    result = bridge.execute(self.directory, code)
+                    self.assertEqual(result["status"], "error")
+                    json.dumps(result)  # Even bad script arguments must yield a JSON report.
+            del self.state["command_guards"]
+            self.save()
+            result = bridge.execute(self.directory, "act('end_turn', if_state='s0')")
+            self.assertIn("newer DLL", result["error"])
+            sender.assert_not_called()
+
+    def test_execute_sequence_stop_preserves_selector_and_unsubmitted_tail(self):
+        def send(*_, **fields):
+            self.state["state_id"] = "select-a"
+            self.state["card_selection"] = {"kind": "combat_hand"}
+            self.save()
+            return {"status": "ok", "command_id": "awaits-selection"}
+
+        with patch("bridge._send_command", side_effect=send) as sender:
+            result = bridge.execute(self.directory, f"""
+play_sequence({self.plays!r}, if_state='s0')
+act('end_turn', if_state='select-a')
+""")
+        sender.assert_called_once()
+        self.assertEqual(result["status"], "stopped")
+        partial = result["calls"][0]["response"]
+        self.assertEqual(partial["stop_reason"], "selection_required")
+        self.assertEqual(partial["unsubmitted"], [{"card_id": "b", "target_id": "e1"}])
+        self.assertFalse(partial["steps"][0]["completion_observed"])
+        self.assertEqual(result["observation"]["state"]["card_selection"], {"kind": "combat_hand"})
+
+    def test_execute_sequence_uses_native_client_guards_and_returns_to_script_on_completion(self):
+        def send(*_, **fields):
+            self.assertEqual(fields["expected_state_id"], self.state["state_id"])
+            self.resolve(fields["card_id"])
+            return {"status": "ok"}
+
+        with patch("bridge._send_command", side_effect=send) as sender:
+            result = bridge.execute(self.directory, f"""
+plays = {self.plays!r}
+r = play_sequence(plays, if_state=observe()['state']['state_id'])
+plays.clear()
+emit(r['status'])
+emit(observe('combat')['state']['hand'])
+""")
+        self.assertEqual(sender.call_count, 2)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["output"], ["completed", []])
+        self.assertEqual(result["calls"][0]["arguments"]["plays"], self.plays)
+        self.assertEqual([s["state_id"] for s in result["calls"][0]["response"]["steps"]], ["s0x", "s0xx"])
+
+    def test_execute_timeout_and_existing_writer_do_not_retry_or_clear_pending_commands(self):
+        code = "observe(); act('end_turn', if_state='s0', timeout=0.01); act('end_turn', if_state='s0')"
+        with bridge.writer(self.directory):
+            blocked = bridge.execute(self.directory, code)
+            self.assertIn("FileExistsError", blocked["error"])
+            self.assertTrue((self.directory / "client.lock").exists())
+            self.assertFalse((self.directory / "command.json").exists())
+        result = bridge.execute(self.directory, code)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(len(result["calls"]), 1)
+        pending = (self.directory / "command.json").read_bytes()
+        self.assertIn(json.loads(pending)["command_id"], result["error"])
+        self.assertIn("TimeoutError", result["calls"][0]["error"])
+        again = bridge.execute(self.directory, code)
+        self.assertIn("FileExistsError", again["error"])
+        self.assertEqual((self.directory / "command.json").read_bytes(), pending)
+        self.assertFalse((self.directory / "client.lock").exists())
+
+    def test_execute_compiles_before_actions_and_reports_script_errors(self):
+        with patch("bridge._send_command") as sender:
+            result = bridge.execute(self.directory, "act('end_turn', if_state='s0')\nif", filename="plan.py")
+            self.assertEqual(result["calls"], [])
+            self.assertIn("SyntaxError", result["error"])
+            self.assertIn("plan.py", result["error"])
+            for code, error in [("emit(set())", "TypeError"), ("emit(float('nan'))", "ValueError"),
+                                ("raise SystemExit(0)", "SystemExit"), ("raise KeyboardInterrupt()", "KeyboardInterrupt")]:
+                with self.subTest(code=code):
+                    result = bridge.execute(self.directory, "emit(17)\n" + code)
+                    self.assertEqual(result["status"], "error")
+                    self.assertEqual(result["output"], [17])
+                    self.assertIn(error, result["error"])
+            sender.assert_not_called()
+
     def test_skill_is_self_contained_and_help_never_sends_commands(self):
         root = Path(__file__).resolve().parent.parent
         skill = root / ".agents/skills/playing-sts2"
@@ -212,7 +372,7 @@ class BridgeTests(unittest.TestCase):
         # supply a missing script dependency. Paths with spaces must work too.
         command = [sys.executable, "-I", "-B", str(installed / "scripts/sts2_bridge.py")]
         absent = self.directory / "do not create"
-        help_paths = [[], ["observe"], ["act"], ["play-sequence"]]
+        help_paths = [[], ["execute"], ["observe"], ["act"], ["play-sequence"]]
         help_paths += [["act", action] for action in bridge.ACTIONS]
         for help_path in help_paths:
             with self.subTest(help_path=help_path):
@@ -225,6 +385,26 @@ class BridgeTests(unittest.TestCase):
                                 cwd=workspace, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["state"], self.state)
+        code = "s = observe('full')['state']; print('diagnostic'); emit(s['future_mechanic']); emit('é')"
+        script = self.directory / "plan with spaces.py"
+        script.write_text(code, encoding="utf-8")
+        for source, stdin in [(["--code", code], None), (["--file", str(script)], None), (["--file", "-"], code)]:
+            with self.subTest(source=source):
+                result = subprocess.run(command + ["--bridge-dir", str(self.directory), "execute"] + source,
+                                        input=stdin, cwd=workspace, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["output"], [{"important": True}, "é"])
+                self.assertEqual(result.stderr.strip(), "diagnostic")
+        for args, exit_code in [([], 2), (["--code", "pass", "--file", "-"], 2),
+                                (["--file", str(absent)], 1), (["--code", "assert False, 'stop'"], 1),
+                                (["--code", "if"], 1)]:
+            with self.subTest(args=args):
+                result = subprocess.run(command + ["--bridge-dir", str(absent), "execute"] + args,
+                                        cwd=workspace, capture_output=True, text=True)
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                if exit_code == 1:
+                    self.assertIn("error", json.loads(result.stdout))
+                self.assertFalse(absent.exists())
         self.assertFalse((self.directory / "command.json").exists())
         self.assertFalse((self.directory / "client.lock").exists())
         self.assertEqual(list(workspace.iterdir()), [])

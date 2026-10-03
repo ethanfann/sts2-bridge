@@ -2,11 +2,12 @@
 """Read STS2 Bridge observations and issue actions. Python 3.8+; no dependencies."""
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 import json
 import math
 import os
 from pathlib import Path
+import sys
 import time
 import uuid
 
@@ -253,22 +254,126 @@ def play_sequence(directory, plays, *, if_state, timeout=10, view="decision"):
         return finish(None)
 
 
+class _ExecutionStopped(Exception):
+    """Return control to the agent after a rejected action or sequence boundary."""
+
+
+def execute(directory, code, *, filename="<bridge-execute>"):
+    """Run trusted local Python with bound bridge helpers; return a JSON report.
+
+    This is not a sandbox, transaction, or whole-script timeout. Existing action
+    timeouts and per-action/sequence writer locks apply. Nothing is retried.
+    """
+    directory = Path(directory)
+    calls, output = [], []
+    latest = None
+
+    def observe(view="decision"):
+        nonlocal latest
+        latest = observation(read_state(directory), view)
+        return json.loads(json.dumps(latest))
+
+    def emit(value):
+        # Capture the value now, rather than a reference the script may mutate.
+        output.append(json.loads(json.dumps(value, allow_nan=False)))
+
+    def invoke(method, arguments, operation):
+        nonlocal latest
+        entry = {"method": method}
+        calls.append(entry)
+        try:
+            entry["arguments"] = json.loads(json.dumps(arguments, allow_nan=False))
+            guard = arguments["if_state"]
+            if not isinstance(guard, str) or not guard:
+                raise ValueError("A nonempty if_state from the planning observation is required.")
+            response = operation()
+        except Exception as error:
+            entry["error"] = f"{type(error).__name__}: {error}"
+            raise
+        latest = json.loads(json.dumps(response["observation"]))
+        # Keep transport/partial-execution evidence without duplicating snapshots.
+        entry["response"] = json.loads(json.dumps({
+            key: value for key, value in response.items() if key != "observation"}))
+        if ((method == "act" and response["result"].get("status") != "ok")
+                or (method == "play_sequence" and response["status"] != "completed")):
+            raise _ExecutionStopped("Inspect the call result and observation before continuing.")
+        return response
+
+    def guarded_act(action, *, if_state, view="decision", timeout=5, **fields):
+        return invoke("act", {"action": action, "if_state": if_state, **fields},
+                      lambda: act(directory, action, if_state=if_state,
+                                  view=view, timeout=timeout, **fields))
+
+    def guarded_sequence(plays, *, if_state, view="decision", timeout=10):
+        return invoke("play_sequence", {"plays": plays, "if_state": if_state},
+                      lambda: play_sequence(directory, plays, if_state=if_state,
+                                            view=view, timeout=timeout))
+
+    report = {"status": "completed", "output": output, "calls": calls}
+    namespace = {"__name__": "__main__", "__file__": filename,
+                 "observe": observe, "act": guarded_act,
+                 "play_sequence": guarded_sequence, "emit": emit}
+    try:
+        # Compile the whole script before it can submit any actions. One namespace
+        # gives script-defined functions normal access to imports and variables.
+        program = compile(code, filename, "exec")
+        with redirect_stdout(sys.stderr):
+            exec(program, namespace)
+    except (Exception, SystemExit, KeyboardInterrupt) as error:
+        report["status"] = "stopped" if isinstance(error, _ExecutionStopped) else "error"
+        report["error"] = f"{type(error).__name__}: {error}"
+        report["observation"] = latest
+    report["note"] = ("Script completion is not game-effect completion. Calls record helper attempts, "
+                      "not a transaction. Earlier actions are not rolled back; never replay blindly.")
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=(
         "Run from any working directory using the script's absolute path. "
         "The game log prints 'STS2 Bridge writing state to .../state.json'; "
         "use its parent directory as --bridge-dir, especially outside native Linux. "
         "This option selects existing data; it does not configure or start the mod. "
-        "Discover syntax with observe --help, act --help, act play_card --help, "
-        "and play-sequence --help. Help is read-only; do not probe actions by "
+        "Discover code mode with execute --help, or individual commands with "
+        "observe --help, act --help, act play_card --help, and play-sequence --help. "
+        "Help is read-only; do not probe actions by "
         "omitting arguments (act end_turn executes). Commands return JSON. "
-        "Exit codes: 0 success, 1 error or stopped sequence, 2 argument error."))
+        "Exit codes: 0 success, 1 error or stopped sequence/script, 2 argument error."))
     parser.add_argument("--bridge-dir", type=Path, default=default_bridge_dir(), help=(
         "Bridge data directory, NOT the mods or skill folder (default: %(default)s). "
         "Put before the subcommand. Relative paths resolve from the working directory."))
     view_help = "Observation view (default: %(default)s). Omitted sections: " + "; ".join(
         f"{view}: {', '.join(sorted(omitted)) or 'none'}" for view, omitted in VIEWS.items())
     commands = parser.add_subparsers(dest="command", required=True)
+    execute_parser = commands.add_parser("execute", help="Code mode: run Python with bound bridge helpers",
+        formatter_class=argparse.RawDescriptionHelpFormatter, description=(
+        "Run trusted local Python, not code inside the game. NOT a sandbox: code has "
+        "the same filesystem/process permissions as this CLI. No whole-script timeout.\n"
+        "Helpers use --bridge-dir; no imports, subprocess wrappers, or character CLI needed:\n\n"
+        "  observe(view='decision') -> {state, omitted_sections, note}\n"
+        "  act(action, *, if_state, view='decision', timeout=5, **fields)\n"
+        "  play_sequence(plays, *, if_state, view='decision', timeout=10)\n"
+        "  emit(value)  # append a JSON-serializable value to output\n\n"
+        "act and play_sequence return the same responses as their CLI commands. "
+        "Both require a nonempty if_state from the observation used to plan; they "
+        "never refresh the guard for you. Rejections and sequence stops raise and "
+        "halt the script unless caught, preserving partial results. Do not catch these to "
+        "blindly retry. Existing per-call timeouts and writer locks apply, not a "
+        "script-wide lock. An ok action is accepted, not necessarily settled.\n\n"
+        "stdout: one JSON report with status (completed/stopped/error), output, and "
+        "calls (helper attempts, responses without snapshots, or errors). Failures "
+        "also include the last observed snapshot, which may predate the failure. "
+        "print() goes to stderr. Use emit() to choose what context to return. "
+        "No automatic final observation, retries, rollback, or variable persistence "
+        "between invocations. Use bounded scripts; imports and time.sleep work.\n\n"
+        "Read-only example:\n"
+        "  execute --code \"s = observe('combat')['state']; emit(s['hand'])\"\n\n"
+        "For actions, read act --help and act <action> --help. Python keyword names "
+        "use underscores, e.g. card_id and target_id. Read play-sequence --help "
+        "for completion and decision-boundary semantics."))
+    source = execute_parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--code", help="Python source to execute locally")
+    source.add_argument("--file", help="UTF-8 Python file, or - to read source from stdin")
     observe_parser = commands.add_parser("observe", help="Read saved state; works offline too", description=(
         "Read a saved observation without sending a command. A snapshot may persist "
         "after the game exits; it is not proof of liveness. JSON includes state and "
@@ -317,7 +422,11 @@ def main():
                                        "Instance/option ID from the current observation, not a model name or index")
     args = parser.parse_args()
     try:
-        if args.command == "observe":
+        if args.command == "execute":
+            code = args.code if args.code is not None else (
+                sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8"))
+            response = execute(args.bridge_dir, code, filename=args.file or "<bridge-execute>")
+        elif args.command == "observe":
             response = observation(read_state(args.bridge_dir), args.view)
         elif args.command == "play-sequence":
             response = play_sequence(args.bridge_dir, json.loads(args.plays), if_state=args.if_state,
@@ -332,7 +441,7 @@ def main():
         return 1
     print(json.dumps(response, indent=2))
     return int((args.command == "act" and response["result"].get("status") != "ok")
-               or (args.command == "play-sequence" and response["status"] != "completed"))
+               or (args.command in ("play-sequence", "execute") and response["status"] != "completed"))
 
 
 if __name__ == "__main__":

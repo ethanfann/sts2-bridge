@@ -1,6 +1,6 @@
 # sts2-bridge
 
-**Experimental v0.1.2.** A file-based Slay the Spire 2 state/action bridge for
+**Experimental v0.1.3.** A file-based Slay the Spire 2 state/action bridge for
 external controllers. Exports structured observations and accepts semantic game
 commands. Includes a Python CLI and an installable agent skill.
 
@@ -720,7 +720,7 @@ orb order/overflow/evoke/slots/Focus/Dark/Plasma. It also checks nonmutating rea
 character-state command guards, and reset between combats. These focused fixtures
 are not full-run validation or exhaustive coverage of every card/relic interaction.
 
-`python3 release.py --tag v0.1.2` builds against
+`python3 release.py --tag v0.1.3` builds against
 [Book.StS2.RefLib 0.107.1](https://www.nuget.org/packages/Book.StS2.RefLib/0.107.1)
 and writes the DLL, manifest, ZIP, standalone uploader, license, and checksums to `dist/release/`.
 Reference assemblies are compile-only and excluded from the package.

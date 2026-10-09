@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
@@ -23,6 +24,7 @@ internal static class CommandProcessor
     };
 
     private static string? _lastProcessedCommandId;
+    private static readonly HashSet<string> ReportedCommandProblems = new();
 
     public static string CommandFilePath => Path.Combine(StateExporter.StateDirectoryPath, "command.json");
 
@@ -40,12 +42,14 @@ internal static class CommandProcessor
         {
             payload = File.ReadAllText(CommandFilePath);
         }
-        catch (IOException)
+        catch (IOException exception)
         {
+            ReportUnprocessedCommand("read_failed", exception.Message);
             return;
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException exception)
         {
+            ReportUnprocessedCommand("read_failed", exception.Message);
             return;
         }
 
@@ -59,8 +63,14 @@ internal static class CommandProcessor
         {
             command = JsonSerializer.Deserialize<BridgeCommand>(payload, JsonOptions);
         }
-        catch (JsonException)
+        catch (JsonException exception)
         {
+            // command.json is published atomically, so a payload that does not
+            // parse will never parse on a later poll. Report it, answer the
+            // client, and clear the file so it cannot block later commands.
+            ReportUnprocessedCommand("invalid_json", exception.Message);
+            WriteResult(Error(null, "Command payload is not valid JSON."));
+            DeleteCommandFile();
             return;
         }
 
@@ -607,12 +617,27 @@ internal static class CommandProcessor
                 File.Delete(CommandFilePath);
             }
         }
-        catch (IOException)
+        catch (IOException exception)
         {
+            ReportUnprocessedCommand("delete_failed", exception.Message);
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException exception)
         {
+            ReportUnprocessedCommand("delete_failed", exception.Message);
         }
+    }
+
+    private static void ReportUnprocessedCommand(string kind, string detail)
+    {
+        // The bridge polls for a pending command every 100 ms, so report each
+        // distinct problem once instead of on every poll.
+        if (!ReportedCommandProblems.Add(kind + ":" + detail))
+        {
+            return;
+        }
+
+        TraceRecorder.Log("command.unprocessed", ("kind", kind), ("error", detail));
+        Log.Warn("STS2 Bridge could not process a pending command; the recording timeline holds the cause.");
     }
 
     private static CommandResult Success(string? commandId, string message)

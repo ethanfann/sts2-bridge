@@ -8,8 +8,28 @@ compatibility: "Requires Python 3.8+ and filesystem access to the running game's
 # Playing STS2
 
 Use the bundled CLI to observe and control the user's Slay the Spire 2 run.
-This skill describes the interface, not a tactical policy or card tier list.
+This skill covers the interface and basic game rules, not a fixed tactical
+policy or card tier list.
 Do not issue gameplay actions when the user only asked to inspect the run.
+
+## Load the rules and retain run context
+
+Before starting or resuming play, including after a context reset, read the
+bundled [game rules](references/game-rules.md). Resolve that path relative to
+this `SKILL.md`, not the working directory. Check its game-version scope and
+identify the run's cumulative Ascension modifiers; do not infer them from STS1.
+
+Keep a compact run note in the conversation: game build and any rules uncertainty,
+character/Ascension and active modifiers, current deck weakness, next known
+threat, and next confirmed recovery point. Refresh it at act transitions and
+after material changes; reconcile it with a fresh observation when resuming.
+
+Before potion, rest/upgrade, or route decisions, revisit the relevant rules.
+Compare survival through the next threat and HP after confirmed recovery with
+the value of saved resources or permanent improvements. Include known triggers
+and distinguish uncertain outcomes; do not optimize only for immediate HP or
+assume a future heal makes lethal damage safe. Live game values already include
+modifiers: do not apply them twice.
 
 ## Continue the authorized run
 
@@ -56,7 +76,7 @@ than assuming this document is an exhaustive command reference.
 | Location | Purpose |
 | --- | --- |
 | `<game>/mods/sts2-bridge/` | Contains `sts2-bridge.dll` **and** `sts2-bridge.json`. Installed with the game closed, then enabled in-game. Not a state directory. |
-| This skill's directory | Contains this guide, `LICENSE`, and the self-contained CLI under `scripts/`. Installed by `npx skills`; no repository checkout needed. |
+| This skill's directory | Contains this guide, `references/`, `LICENSE`, and the self-contained CLI under `scripts/`. Installed by `npx skills`; no repository checkout needed. |
 | Agent working directory | Any workspace the user chooses. It does not select the game or relocate bridge data. Use the absolute CLI path from here. |
 | Bridge data directory | Live `state.json`, `command.json`, `command-result.json`, `client.lock`, and `recordings/`. Both the game and client must access the same directory. |
 

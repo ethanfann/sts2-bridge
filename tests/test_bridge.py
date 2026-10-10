@@ -1,6 +1,7 @@
 import copy
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -368,6 +369,14 @@ emit(observe('combat')['state']['hand'])
         workspace = self.directory / "unrelated workspace"
         workspace.mkdir()
         self.assertEqual((installed / "LICENSE").read_bytes(), (root / "LICENSE").read_bytes())
+        # Instructions must not rely on reference files left in the checkout.
+        for document in installed.rglob("*.md"):
+            for target in re.findall(r"\]\(([^)]+)\)", document.read_text(encoding="utf-8")):
+                if "://" in target or target.startswith("#"):
+                    continue
+                reference = (document.parent / target.split("#", 1)[0]).resolve()
+                reference.relative_to(installed.resolve())
+                self.assertTrue(reference.is_file(), f"Missing skill resource: {target}")
         # Only the copied skill is importable: neither the checkout nor cwd can
         # supply a missing script dependency. Paths with spaces must work too.
         command = [sys.executable, "-I", "-B", str(installed / "scripts/sts2_bridge.py")]

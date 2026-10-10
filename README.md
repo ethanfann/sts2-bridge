@@ -1,6 +1,6 @@
 # sts2-bridge
 
-**Experimental v0.1.3.** A file-based Slay the Spire 2 state/action bridge for
+**Experimental v0.1.4.** A file-based Slay the Spire 2 state/action bridge for
 external controllers. Exports structured observations and accepts semantic game
 commands. Includes a Python CLI and an installable agent skill.
 
@@ -51,6 +51,12 @@ agent after installation.
 The [playing-sts2 skill](.agents/skills/playing-sts2/SKILL.md) ships its own
 `scripts/sts2_bridge.py` and MIT license. The CLI implementation lives inside the
 skill; root `bridge.py` is a checkout entry point to the same code.
+
+The bundled [game rules](.agents/skills/playing-sts2/references/game-rules.md)
+cover cumulative Ascension modifiers, Ancient healing, and resource lifetimes
+for game v0.107.1. The skill instructs agents to read them when starting/resuming
+play and retain compact run context for resource decisions. The reference is not
+a simulator or card-ranking policy. Skill updates install separately from the mod ZIP.
 
 The installed CLI's **`--help` is authoritative**. Resolve `<skill-dir>` from the
 installer or the loaded skill's location:
@@ -720,7 +726,7 @@ orb order/overflow/evoke/slots/Focus/Dark/Plasma. It also checks nonmutating rea
 character-state command guards, and reset between combats. These focused fixtures
 are not full-run validation or exhaustive coverage of every card/relic interaction.
 
-`python3 release.py --tag v0.1.3` builds against
+`python3 release.py --tag v0.1.4` builds against
 [Book.StS2.RefLib 0.107.1](https://www.nuget.org/packages/Book.StS2.RefLib/0.107.1)
 and writes the DLL, manifest, ZIP, standalone uploader, license, and checksums to `dist/release/`.
 Reference assemblies are compile-only and excluded from the package.
